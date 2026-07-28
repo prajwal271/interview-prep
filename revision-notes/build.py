@@ -44,8 +44,13 @@ SKIP_DIRS = {
 
 # ---------- block classification ----------------------------------------
 
-DIAGRAM_CHARS = set("→↓↑←─│┌┐└┘├┤┬┴┼╔╗╚╝═║╠╣╦╩╬▼▲►◄")
+# Box-drawing / tree glyphs are a STRONG diagram signal — a line carrying them
+# is structural even if it also holds a sentence-like caption.
+BOX_DRAWING_CHARS = set("─│┌┐└┘├┤┬┴┼╔╗╚╝═║╠╣╦╩╬▼▲►◄")
+# A lone arrow is a WEAK signal — it's routinely used mid-sentence as "leads to".
+WEAK_ARROW_CHARS = set("→↓↑←")
 ARROW_TOKENS = ("-->", "==>", "<--")
+DIAGRAM_CHARS = BOX_DRAWING_CHARS | WEAK_ARROW_CHARS  # (kept for reference)
 
 # A line is "code-like" if it has structural Java/SQL/config markers that
 # never appear in English prose written by a human.
@@ -63,8 +68,9 @@ STRONG_CODE_LINE_RE = re.compile(
     r"|^\s*//"                                               # // comment
     r"|^\s*/\*"                                              # /* comment
     r"|^\s*\*\s"                                             # javadoc body
-    r"|^\s*[A-Z]\w*(<[^>]*>)?\s+\w+\s*=\s*new\s+"            # Type x = new ...
+    r"|^\s*[A-Z][\w<>\[\],]*\s+\w+\s*=\s*\S"                 # Type x = ... (any RHS)
     r"|^\s*[a-zA-Z_]\w*\.\w+\([^)]*\)\s*[.;]"                # obj.method(...) chain
+    r"|^\s*\.\w+\s*\("                                       # .fluent(...) continuation
 )
 
 # Words common in English prose. If a line has several of these AND multiple
@@ -197,12 +203,13 @@ def split_blocks(text: str) -> list[list[str]]:
 
 
 def _strip_line_comment(line: str) -> str:
-    """Drop a trailing ``// comment`` so the prose that lives in code comments
-    doesn't make a real code line look like an English sentence. Leaves
+    """Drop a trailing ``//`` or ``--`` code/SQL comment so the English that
+    lives in comments doesn't make a real code line look like a sentence. Leaves
     ``https://`` URLs intact."""
-    idx = line.find("//")
-    if idx > 0 and not line[:idx].rstrip().endswith(":"):
-        return line[:idx]
+    for marker in ("//", "--"):
+        idx = line.find(marker)
+        if idx > 0 and not line[:idx].rstrip().endswith(":"):
+            line = line[:idx]
     return line
 
 
@@ -215,27 +222,37 @@ def looks_prosey(line: str) -> bool:
     return connectors >= 2
 
 
+def _is_compact_line(line: str) -> bool:
+    """A short, structural line (a flow step / label) — not a full sentence."""
+    return len(line.split()) <= 8 and len(line.strip()) <= 60
+
+
 def is_diagram_block(block: list[str]) -> bool:
-    """True only for real ASCII diagrams / arrow flows — never for prose that
-    merely contains a '→' used as "leads to". A line counts toward the diagram
-    only if it carries diagram glyphs AND does not read like a sentence; a
-    single prosey line vetoes the whole block."""
+    """Detect real ASCII diagrams / trees / arrow flows without swallowing prose.
+
+    Box-drawing glyphs are decisive: two or more such lines make it a diagram
+    even if a caption line reads like a sentence (real trees have labelled
+    branches). A *lone* arrow only counts when the line is short and structural,
+    so a prose sentence that merely uses '→' as "leads to" stays prose."""
     non_blank = [l for l in block if l.strip()]
     if len(non_blank) < 2:
         return False
-    diagram_lines = 0
+    box_lines = 0
+    arrow_lines = 0
     prose_lines = 0
     for line in non_blank:
-        prosey = looks_prosey(line)
-        has_glyph = (any(ch in line for ch in DIAGRAM_CHARS)
+        if any(ch in line for ch in BOX_DRAWING_CHARS):
+            box_lines += 1
+            continue
+        has_arrow = (any(ch in line for ch in WEAK_ARROW_CHARS)
                      or any(tok in line for tok in ARROW_TOKENS))
-        if has_glyph and not prosey:
-            diagram_lines += 1
-        elif prosey:
+        if has_arrow and not looks_prosey(_strip_line_comment(line)) and _is_compact_line(line):
+            arrow_lines += 1
+        elif looks_prosey(_strip_line_comment(line)):
             prose_lines += 1
-    if prose_lines:
-        return False
-    return diagram_lines >= 2 and diagram_lines >= (len(non_blank) + 1) // 2
+    if box_lines >= 2:
+        return True
+    return prose_lines == 0 and arrow_lines >= 2 and arrow_lines >= (len(non_blank) + 1) // 2
 
 
 # SQL statements and key=value config lines that the Java-oriented code detector
@@ -255,12 +272,25 @@ def is_sqlish_block(block: list[str]) -> bool:
     non_blank = [l for l in block if l.strip()]
     if len(non_blank) < 2:
         return False
-    sql = sum(1 for l in non_blank if _SQL_LINE_RE.match(l))
-    cfg = sum(1 for l in non_blank if _CONFIG_LINE_RE.match(l))
-    prose = sum(1 for l in non_blank if looks_prosey(l))
+    # A DDL statement (CREATE/ALTER TABLE ( … )) — column lines dilute the
+    # keyword ratio, so recognise the block by its opening statement.
+    ddl = bool(re.match(r"(?i)^(CREATE|ALTER)\s+TABLE\b", non_blank[0].strip()))
+    sql = cfg = comment = prose = 0
+    for l in non_blank:
+        if l.strip().startswith("--"):            # SQL line comment
+            comment += 1
+        elif _SQL_LINE_RE.match(l):
+            sql += 1
+        elif _CONFIG_LINE_RE.match(l):
+            cfg += 1
+        elif looks_prosey(_strip_line_comment(l)):
+            prose += 1
     if prose:
         return False
-    if sql >= 2 and sql >= len(non_blank) // 2:
+    if ddl:
+        return True
+    stmt = len(non_blank) - comment                # non-comment lines
+    if sql >= 1 and sql + comment >= 2 and sql >= stmt // 2:
         return True
     if cfg >= 2 and cfg >= (len(non_blank) + 1) // 2:
         return True
@@ -274,12 +304,16 @@ def is_code_block(block: list[str]) -> bool:
     code_score = 0
     prose_score = 0
     has_brace = False
+    strong = 0
+    non_blank = 0
     for line in block:
         stripped = line.strip()
         if not stripped:
             continue
+        non_blank += 1
         if STRONG_CODE_LINE_RE.search(line):
             code_score += 2
+            strong += 1
         elif stripped.endswith(";"):
             code_score += 1
         elif stripped in ("{", "}", "};", "});", "})"):
@@ -289,6 +323,11 @@ def is_code_block(block: list[str]) -> bool:
             has_brace = True
         if looks_prosey(_strip_line_comment(line)):
             prose_score += 2
+    # Pure code: (nearly) every line is an unambiguous code statement and none
+    # reads as prose — catches import-only blocks and lone statements that never
+    # reach the score thresholds below (e.g. `obj.method();`, `Type x = new X();`).
+    if strong >= 1 and strong >= non_blank - 1 and prose_score == 0:
+        return True
     if has_brace and code_score >= 2 and code_score >= prose_score:
         return True
     return code_score >= 4 and code_score > prose_score * 2
@@ -305,6 +344,12 @@ HEADER_PATTERNS = [
 ]
 
 EMOJI_HEADER_RE = re.compile(r"^[\U0001F300-\U0001FAFF☀-➿]")
+_LEADING_EMOJI_RE = re.compile(r"^(?:[\U0001F300-\U0001FAFF☀-➿][️‍]?\s*)+")
+
+
+def _strip_leading_emoji(s: str) -> str:
+    """Drop a leading emoji + spacing so '🧩 PART 1 — …' is seen as 'PART 1 — …'."""
+    return _LEADING_EMOJI_RE.sub("", s)
 
 
 # Lowercase words that betray a mid-sentence prose line masquerading as a
@@ -325,9 +370,11 @@ def header_level(block: list[str]) -> int | None:
         return None
     # Explicit section markers (TOPIC/PART/STEP/Problem/Solution/Chapter/Day + N)
     # are unambiguous headers — accept them before the punctuation guards, so a
-    # trailing ":" / an "(aside)" / an "— subtitle" doesn't demote them.
+    # trailing ":" / an "(aside)" / an "— subtitle" (or a leading emoji) doesn't
+    # demote them.
+    marker = _strip_leading_emoji(line)
     for pat in HEADER_PATTERNS:
-        if pat.match(line):
+        if pat.match(marker):
             return 2
     if line.endswith((".", "?", ",", ";", ":", "!")):
         return None
@@ -430,24 +477,33 @@ def merge_code_runs(blocks: list[list[str]], kinds: list[str]) -> tuple[list[lis
 
 
 def _is_explicit_header_line(line: str) -> bool:
-    s = line.strip()
-    if not s or len(s) > 90:
+    """A line that opens with an explicit section marker (Part/Step/TOPIC/Day N …),
+    allowing a leading emoji. Length is not capped here: a long 'Step N — …'
+    caption still gets split into its own block; header_level then renders it as
+    prose (too long to be a heading) rather than leaving it welded to code."""
+    s = _strip_leading_emoji(line.strip())
+    if not s or STRONG_CODE_LINE_RE.search(line):
         return False
     return any(pat.match(s) for pat in HEADER_PATTERNS)
 
 
 def peel_headers(blocks: list[list[str]]) -> list[list[str]]:
-    """Split leading explicit-header lines (Part/Step/TOPIC/Day N …) off the
-    front of a block. Notes often run a section header straight into the code
-    or prose that follows with no blank line between them."""
+    """Split a block at every explicit-header line (not only the front). Notes
+    routinely run a section marker straight into the code or prose that follows
+    it, and sometimes tuck it behind a one-line title."""
     out: list[list[str]] = []
     for b in blocks:
-        i = 0
-        while i < len(b) and _is_explicit_header_line(b[i]):
-            out.append([b[i]])
-            i += 1
-        if i < len(b):
-            out.append(b[i:])
+        cur: list[str] = []
+        for line in b:
+            if _is_explicit_header_line(line):
+                if cur:
+                    out.append(cur)
+                    cur = []
+                out.append([line])
+            else:
+                cur.append(line)
+        if cur:
+            out.append(cur)
     return out
 
 
