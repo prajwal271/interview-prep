@@ -11,9 +11,10 @@
   --fg: #1c1f24;
   --fg-soft: #5b6470;
   --fg-muted: #8a929d;
-  --accent: #4b6bfb;
-  --accent-soft: #eef1ff;
-  --accent-strong: #3b54d6;
+  --accent: #4b6bfb;   /* per-topic accent; overridden inline by build.py */
+  --accent-strong: color-mix(in srgb, var(--accent) 82%, #000);
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-tint: color-mix(in srgb, var(--accent) 6%, transparent);
   --border: #e3e6ec;
   --border-soft: #eef0f4;
   --code-bg: #f5f6fa;
@@ -39,9 +40,10 @@
     --fg: #e6e8eb;
     --fg-soft: #a3aab4;
     --fg-muted: #6d747e;
-    --accent: #7ea2ff;
-    --accent-soft: #1a2238;
-    --accent-strong: #aebfff;
+    --accent: #7ea2ff;   /* per-topic accent; overridden inline by build.py */
+    --accent-strong: color-mix(in srgb, var(--accent) 72%, #fff);
+    --accent-soft: color-mix(in srgb, var(--accent) 26%, transparent);
+    --accent-tint: color-mix(in srgb, var(--accent) 12%, transparent);
     --border: #262b33;
     --border-soft: #1d2127;
     --code-bg: #0b0e12;
@@ -86,8 +88,11 @@ a:hover { color: var(--accent-strong); text-decoration: underline; text-underlin
   background: color-mix(in srgb, var(--bg) 85%, transparent);
   backdrop-filter: saturate(180%) blur(10px);
   -webkit-backdrop-filter: saturate(180%) blur(10px);
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--accent-soft);
+  border-top: 3px solid var(--accent);
 }
+
+.site-header .nav-row a { color: var(--accent-strong); }
 
 .site-header .nav-row {
   display: flex;
@@ -133,6 +138,16 @@ h1.page-title {
   font-weight: 700;
 }
 
+h1.page-title::after {
+  content: "";
+  display: block;
+  width: 56px;
+  height: 4px;
+  margin-top: 14px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 40%, transparent));
+}
+
 @media (min-width: 720px) {
   h1.page-title { font-size: 2.3rem; }
 }
@@ -149,11 +164,13 @@ h1.page-title {
 h2.section {
   font-size: 1.4rem;
   margin: 44px 0 16px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 4px 0 8px 14px;
+  border-left: 4px solid var(--accent);
+  border-bottom: 2px solid var(--accent-soft);
   line-height: 1.3;
   letter-spacing: -0.01em;
-  font-weight: 650;
+  font-weight: 700;
+  color: var(--accent-strong);
 }
 
 h3.section {
@@ -162,6 +179,19 @@ h3.section {
   line-height: 1.3;
   font-weight: 650;
   color: var(--accent-strong);
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+h3.section::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: translateY(-1px);
 }
 
 /* ---------- prose ---------- */
@@ -184,10 +214,11 @@ h3.section {
 .intro code {
   font-family: var(--mono);
   font-size: 0.88em;
-  background: var(--kbd-bg);
+  background: var(--accent-soft);
   padding: 1px 6px;
   border-radius: 4px;
-  color: var(--fg);
+  color: var(--accent-strong);
+  font-weight: 600;
 }
 
 /* ---------- code blocks ---------- */
@@ -196,6 +227,7 @@ pre.code-block {
   margin: 22px 0;
   background: var(--code-bg);
   border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--accent);
   border-radius: var(--radius);
   overflow: hidden;
   font-size: 0.92rem;
@@ -267,8 +299,13 @@ pre.diagram {
 .month-section > h2 {
   font-size: 1.5rem;
   margin: 0 0 16px;
+  padding-left: 12px;
+  border-left: 5px solid var(--accent);
+  color: var(--accent-strong);
   letter-spacing: -0.01em;
   font-weight: 700;
+  display: flex;
+  align-items: center;
 }
 
 details.week {
@@ -363,12 +400,12 @@ ul.day-list li a .num {
   min-width: 32px;
   height: 24px;
   padding: 0 8px;
-  color: var(--fg-muted);
+  color: var(--accent-strong);
   font-family: var(--mono);
   font-size: 0.78em;
-  background: var(--bg-soft);
+  background: var(--accent-soft);
   border-radius: 4px;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 ul.day-list li a:hover .num {
@@ -453,8 +490,22 @@ nav.pager a.disabled { visibility: hidden; }
   color: var(--fg);
 }
 
-.md-content strong { font-weight: 700; color: var(--fg); }
-.md-content em { font-style: italic; }
+/* highlighter-pen effect on bold key terms */
+.md-content strong,
+.prose strong {
+  font-weight: 700;
+  color: var(--fg);
+  background: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 58%,
+    color-mix(in srgb, var(--accent) 26%, transparent) 58%,
+    color-mix(in srgb, var(--accent) 26%, transparent) 94%,
+    transparent 94%
+  );
+  padding: 0 1px;
+}
+.md-content em { font-style: italic; color: var(--accent-strong); }
 
 .md-content h4.section {
   font-size: 1.02rem;
@@ -492,10 +543,11 @@ nav.pager a.disabled { visibility: hidden; }
 .md-content :not(pre) > code {
   font-family: var(--mono);
   font-size: 0.88em;
-  background: var(--kbd-bg);
+  background: var(--accent-soft);
   padding: 1px 6px;
   border-radius: 4px;
-  color: var(--fg);
+  color: var(--accent-strong);
+  font-weight: 600;
 }
 
 /* blockquote */
@@ -559,6 +611,55 @@ nav.pager a.disabled { visibility: hidden; }
   .md-content p { font-size: 0.98rem; }
   .md-content table { font-size: 0.86rem; }
   .md-content th, .md-content td { padding: 8px 10px; }
+}
+
+/* ---------- per-topic colour accents ---------- */
+
+pre.diagram {
+  background: var(--accent-tint);
+  border-color: var(--accent-soft);
+}
+
+.md-content thead th {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.md-content blockquote {
+  background: var(--accent-tint);
+  border-left-color: var(--accent);
+}
+
+.md-content .table-wrap { border-color: var(--accent-soft); }
+
+.intro {
+  border-left: 4px solid var(--accent);
+  background: linear-gradient(to right, var(--accent-tint), var(--bg-card) 40%);
+}
+
+.page-subtitle { color: var(--accent-strong); opacity: 0.85; }
+
+/* week accordion badge + hover in the topic colour */
+details.week .count {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+details.week[open] > summary {
+  color: var(--accent-strong);
+  border-bottom: 1px solid var(--accent-soft);
+}
+
+.month-section > h2 .count {
+  margin-left: 12px;
+  padding: 3px 12px;
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  align-self: center;
 }
 
 /* selection */

@@ -32,6 +32,28 @@ OUTPUT_ROOT = HERE                  # revision-notes/  (the published site root)
 
 SITE_TITLE = "Tech Revision Notes"
 
+# Each topic folder gets its own accent colour (cycled), so subjects are easy to
+# tell apart at a glance. Everything else in the CSS derives from --accent.
+SECTION_COLORS = [
+    "#4b6bfb",  # blue
+    "#10b981",  # emerald
+    "#8b5cf6",  # violet
+    "#f59e0b",  # amber
+    "#ec4899",  # pink
+    "#0ea5e9",  # sky
+    "#ef4444",  # red
+    "#14b8a6",  # teal
+]
+
+
+def assign_section_colors(pages: list["Page"]) -> dict[str, str]:
+    """Map each section to a stable accent colour, in first-seen order."""
+    ordered: list[str] = []
+    for p in pages:
+        if p.section not in ordered:
+            ordered.append(p.section)
+    return {s: SECTION_COLORS[i % len(SECTION_COLORS)] for i, s in enumerate(ordered)}
+
 NOTE_SUFFIXES = {".txt", ".md"}
 
 # Folders that are never treated as topics (this generator's own home, VCS,
@@ -766,7 +788,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
 </head>
-<body>
+<body{body_style}>
 <header class="site-header">
   <div class="nav-row">
     <a href="{index_href}">← All Notes</a>
@@ -827,7 +849,8 @@ INDEX_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def build_index(pages: list[Page]) -> str:
+def build_index(pages: list[Page], colors: dict[str, str] | None = None) -> str:
+    colors = colors or {}
     # section -> group(str|None) -> [pages], preserving discovery order.
     by_section: dict[str, dict[str | None, list[Page]]] = {}
     for p in pages:
@@ -836,7 +859,8 @@ def build_index(pages: list[Page]) -> str:
     parts: list[str] = [f'<p class="note-count">{len(pages)} notes total</p>']
     for section, groups in by_section.items():
         section_total = sum(len(v) for v in groups.values())
-        parts.append('<section class="month-section">')
+        style = f' style="--accent: {colors[section]}"' if section in colors else ""
+        parts.append(f'<section class="month-section"{style}>')
         parts.append(
             f'<h2>{html.escape(humanize_section(section))}'
             f'<span class="count">{section_total} note{"s" if section_total != 1 else ""}</span></h2>'
@@ -949,7 +973,7 @@ def _rel_link(from_page: Page, to_page: Page) -> str:
     return ups + "/".join(to_parts[i:])
 
 
-def write_page(page: Page, prev: Page | None, nxt: Page | None) -> None:
+def write_page(page: Page, prev: Page | None, nxt: Page | None, accent: str = "") -> None:
     page.out_path.parent.mkdir(parents=True, exist_ok=True)
     text = page.src_path.read_text(encoding="utf-8", errors="replace")
 
@@ -998,6 +1022,7 @@ def write_page(page: Page, prev: Page | None, nxt: Page | None) -> None:
         content=content_html,
         prev_link=link(prev, "prev"),
         next_link=link(nxt, "next"),
+        body_style=f' style="--accent: {accent}"' if accent else "",
     )
     page.out_path.write_text(html_out, encoding="utf-8")
 
@@ -1007,6 +1032,7 @@ def main() -> None:
     if not pages:
         print("No .txt/.md notes found in any topic folder.")
         return
+    colors = assign_section_colors(pages)
     # prev/next chain runs within each section, in discovery order.
     by_section: dict[str, list[Page]] = {}
     for p in pages:
@@ -1016,11 +1042,11 @@ def main() -> None:
         for i, page in enumerate(section_pages):
             prev = section_pages[i - 1] if i > 0 else None
             nxt = section_pages[i + 1] if i + 1 < len(section_pages) else None
-            write_page(page, prev, nxt)
+            write_page(page, prev, nxt, colors.get(page.section, ""))
             written.add(page.out_path.resolve())
             print(f"  wrote {page.out_path.relative_to(OUTPUT_ROOT)}")
 
-    index_html = INDEX_TEMPLATE.format(site_title=html.escape(SITE_TITLE), body=build_index(pages))
+    index_html = INDEX_TEMPLATE.format(site_title=html.escape(SITE_TITLE), body=build_index(pages, colors))
     index_path = OUTPUT_ROOT / "index.html"
     index_path.write_text(index_html, encoding="utf-8")
     written.add(index_path.resolve())
