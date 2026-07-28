@@ -1,0 +1,265 @@
+Factory controls how objects get created in the first place — and it's the pattern that most directly cashes in the OCP and DIP
+
+Part 1 — The problem Factory solves
+The root problem: calling new directly welds your code to a concrete class.
+
+Every time you write new SomethingConcrete(), the class doing that is now permanently tied to that specific implementation. It knows the exact type, and it took on the responsibility of creating it. That sounds harmless for one object — but it's the seed of exactly the rigidity, OCP violations, and DIP violations you learned to spot yesterday.
+
+Extract the object-creation logic into a separate place (a "factory"), so the code that uses objects depends only on an abstraction, and the knowledge of which concrete class to build lives in exactly one dedicated spot.
+
+The problem Factory solves is that calling new on a concrete class directly couples the calling code to that implementation. A class that constructs its own dependencies with a big if/else on some type ends up violating several SOLID principles at once: it violates Open/Closed because every new type forces you to edit it, it violates Dependency Inversion because high-level logic now depends on concrete classes, and it mixes the responsibility of creating objects with using them. It also tends to get that creation logic duplicated across every class that needs it, and makes testing harder because there's no seam to inject a fake. The Factory pattern fixes this by extracting object creation into a dedicated place, so callers depend only on an abstraction and the knowledge of which concrete class to build lives in exactly one spot — which is just applying 'program to an interface, not an implementation' to the act of creation
+
+public interface Driver {
+    void launch();
+    void runScenario();
+}
+
+
+public class AndroidDriver implements Driver {
+    public void launch()      { /* start Appium session on Android */ }
+    public void runScenario() { /* ... */ }
+}
+
+public class IOSDriver implements Driver {
+    public void launch()      { /* start Appium session on iOS */ }
+    public void runScenario() { /* ... */ }
+}
+
+public class WebDriver implements Driver {
+    public void launch()      { /* start browser session */ }
+    public void runScenario() { /* ... */ }
+}
+
+public class DriverFactory {
+
+    public static Driver create(String platform) {
+        switch (platform) {
+            case "android": return new AndroidDriver();
+            case "ios":     return new IOSDriver();
+            case "web":     return new WebDriver();
+            default:
+                throw new IllegalArgumentException("Unknown platform: " + platform);
+        }
+    }
+}
+
+public class TestRunner {
+
+    public void runTest(String platform) {
+        Driver driver = DriverFactory.create(platform);   // ask the factory; don't decide
+        driver.launch();
+        driver.runScenario();
+    }
+}
+
+
+TestRunner now depends only on Driver and DriverFactory — never on AndroidDriver, IOSDriver, or WebDriver. The high-level policy talks to abstractions. DIP satisfied.
+
+"Simple Factory extracts object-creation logic into one dedicated class or method, so callers depend on an abstraction instead of constructing concrete types themselves. For example, instead of every class doing an if/else on platform to build an AndroidDriver or IOSDriver, they call DriverFactory.create(platform), which owns that decision and returns the Driver interface. It fixes the coupling — callers satisfy DIP and SRP, and the creation logic isn't duplicated. The honest caveat is that it's not an official GoF pattern and it's not fully Open/Closed: adding a new type still means editing the factory's switch. It just concentrates that change into one well-named place. When I need to avoid editing the factory itself, I either drive it from a Map registry — which is how a ServiceLoader-based plugin factory works — or move up to Factory Method or Abstract Factory."
+
+Part 3 - Factory Method 
+
+public interface Driver {
+    void launch();
+    void runScenario();
+}
+
+public abstract class TestSession {
+
+    // THE FACTORY METHOD — abstract: base class refuses to decide the concrete type.
+    protected abstract Driver createDriver();
+
+    // The shared workflow (the "template") that USES the product.
+    public void execute() {
+        Driver driver = createDriver();   // calls the subclass's version at runtime
+        driver.launch();
+        driver.runScenario();
+        System.out.println("Session complete");
+    }
+}
+
+public class AndroidTestSession extends TestSession {
+    @Override
+    protected Driver createDriver() {
+        return new AndroidDriver();   // this subclass builds Android
+    }
+}
+
+public class IOSTestSession extends TestSession {
+    @Override
+    protected Driver createDriver() {
+        return new IOSDriver();       // this subclass builds iOS
+    }
+}
+
+TestSession session = new AndroidTestSession();
+session.execute();
+// execute() runs the base-class workflow, but createDriver() resolves
+// to AndroidTestSession's version → an AndroidDriver is built.
+
+Factory Method is a GoF pattern that defines an abstract creation method in a base class and lets subclasses decide which concrete product to instantiate. The base class owns a workflow that uses the product but calls its own abstract factory method for creation, so the choice of concrete type is deferred to whichever subclass is running. For example, an abstract TestSession has an execute() workflow and an abstract createDriver(); AndroidTestSession and IOSTestSession each override createDriver to return their own driver. The advantage over Simple Factory is that it's fully Open/Closed — adding a platform means adding a subclass, not editing a switch — because it replaces conditionals with polymorphism. The trade-off is it only makes sense when there's a shared workflow that varies just in the object it creates; without that surrounding hierarchy, a Simple Factory is the simpler right answer.
+
+Abstract Factory
+Provide an interface for creating families of related or dependent objects without specifying their concrete classes.
+
+Abstract Factory provides an interface for creating families of related objects without naming their concrete classes. You use it when objects must be used together consistently — a matched set. For example, automating a platform needs a driver, an element locator, and a gesture handler that all belong to the same platform; mixing an Android driver with an iOS locator is a bug. So I define an AutomationFactory interface with createDriver, createLocator, and createGestureHandler, and concrete AndroidAutomationFactory and IOSAutomationFactory each return only their own platform's pieces. The client takes the factory and pulls a matched set, so it can't mix families and doesn't know which platform it's on. Adding a new platform is just a new factory class — fully open for extension. The known limitation is the reverse: adding a new product type to the family forces every existing factory to implement it, so it's easy to add families but hard to add product kinds
+
+Step 1 — the product interfaces (the family members):
+public interface Driver          { void launch(); }
+public interface ElementLocator  { Object find(String locator); }
+public interface GestureHandler  { void swipe(int x1, int y1, int x2, int y2); }
+
+Step 2 — the abstract factory: one interface that creates the whole family. Note it has one creation method per product type — this is the structural signature of Abstract Factory:
+public interface AutomationFactory {
+    Driver          createDriver();
+    ElementLocator  createLocator();
+    GestureHandler  createGestureHandler();
+}
+
+Step 3 — one concrete factory per family. Each guarantees internal consistency — every method returns the Android piece, or every method returns the iOS piece:
+public class AndroidAutomationFactory implements AutomationFactory {
+    public Driver          createDriver()         { return new AndroidDriver(); }
+    public ElementLocator  createLocator()        { return new AndroidLocator(); }
+    public GestureHandler  createGestureHandler() { return new AndroidGestures(); }
+}
+
+public class IOSAutomationFactory implements AutomationFactory {
+    public Driver          createDriver()         { return new IOSDriver(); }
+    public ElementLocator  createLocator()        { return new IOSLocator(); }
+    public GestureHandler  createGestureHandler() { return new IOSGestures(); }
+}
+
+Step 4 — the client depends only on the abstract factory and the product interfaces. It never names a single concrete class:
+public class TestSession {
+    private final Driver          driver;
+    private final ElementLocator  locator;
+    private final GestureHandler  gestures;
+
+    // Receives a factory, pulls a matched set from it — DIP in action.
+    public TestSession(AutomationFactory factory) {
+        this.driver   = factory.createDriver();
+        this.locator  = factory.createLocator();
+        this.gestures = factory.createGestureHandler();
+    }
+
+    public void run() {
+        driver.launch();
+        Object el = locator.find("loginButton");
+        gestures.swipe(0, 500, 0, 100);
+    }
+}
+
+Step 5 — usage: choose the family once, at the edge:
+AutomationFactory factory = new AndroidAutomationFactory();   // pick the family here, once
+TestSession session = new TestSession(factory);
+session.run();   // every piece inside is guaranteed Android
+
+EXAMPLE 2
+public interface Engine {
+    void start();
+}
+
+public interface Tyre {
+    void grip();
+}
+
+// Sport family
+public class SportEngine implements Engine {
+    public void start() { System.out.println("Sport engine: 400 hp, roaring to life"); }
+}
+public class SportTyre implements Tyre {
+    public void grip() { System.out.println("Sport tyre: wide, high-grip racing rubber"); }
+}
+
+// Economy family
+public class EconomyEngine implements Engine {
+    public void start() { System.out.println("Economy engine: 90 hp, fuel-efficient"); }
+}
+public class EconomyTyre implements Tyre {
+    public void grip() { System.out.println("Economy tyre: narrow, low-rolling-resistance"); }
+}
+
+public interface VehicleFactory {
+    Engine createEngine();
+    Tyre   createTyre();
+}
+
+public class SportVehicleFactory implements VehicleFactory {
+    public Engine createEngine() { return new SportEngine(); }
+    public Tyre   createTyre()   { return new SportTyre(); }
+}
+
+public class EconomyVehicleFactory implements VehicleFactory {
+    public Engine createEngine() { return new EconomyEngine(); }
+    public Tyre   createTyre()   { return new EconomyTyre(); }
+}
+
+public class VehicleAssembler {
+    private final Engine engine;
+    private final Tyre   tyre;
+
+    // Receives a factory, pulls a matched set from it — DIP in action.
+    public VehicleAssembler(VehicleFactory factory) {
+        this.engine = factory.createEngine();
+        this.tyre   = factory.createTyre();
+    }
+
+    public void assemble() {
+        engine.start();
+        tyre.grip();
+        System.out.println("Vehicle assembled with matching parts.\n");
+    }
+}
+
+Part 5 — Factory Method vs Abstract Factory
+1. What they create — one product vs a family
+Factory Method creates one product, and varies it by subclassing (inheritance). Abstract Factory creates a family of related products, and varies it by choosing which factory object you pass in (composition).
+
+2. How they vary — inheritance vs composition
+Factory Method varies by inheritance. To get an Android driver instead of iOS, you use a different subclass
+Abstract Factory varies by composition. To get Sport instead of Economy, you pass a different factory object into the client — new SportVehicleFactory() vs new EconomyVehicleFactory(). 
+
+3. Structure — one creation method vs several
+Factory Method: one abstract creation method (createDriver()).
+Abstract Factory: multiple creation methods, one per product in the family (createEngine(), createTyre()).
+
+They're often confused but solve different problems. Factory Method creates a single product and varies it through subclassing — a base class declares an abstract createX method and each subclass overrides it, like a TestSession whose subclasses each build their own driver. Abstract Factory creates a whole family of related products that must be consistent, and varies through composition — you pass in a different concrete factory, like a SportVehicleFactory versus an EconomyVehicleFactory, each producing a matching engine and tyre. Structurally, Factory Method has one creation method and Abstract Factory has several — one per product in the family — which is why an Abstract Factory is essentially several factory methods bundled to guarantee a matched set. The rule of thumb: one object deferred to a subclass is Factory Method; a matched family selected by swapping a factory object is Abstract Factory. They're really rungs on the same ladder — you promote from one to the other as a single product grows into a consistent family.
+
+Factory in the real world
+1. Calendar.getInstance() — Simple Factory
+2. Connection conn = DriverManager.getConnection(url, user, password); - Factory (with a registry)
+3. Collection.iterator() — Factory Method 
+	List<String> list = new ArrayList<>();
+	Iterator<String> it = list.iterator();   // ArrayList returns ArrayList$Itr
+
+1. The whole container is a factory — BeanFactory : The root interface of the Spring container is literally called BeanFactory.
+2. @Bean methods — your own factory methods 
+
+
+Factory is really OCP and DIP applied to object creation — callers depend on an abstraction instead of a concrete class, and new types are added without editing the callers. The most complete version of this I've worked with is a plugin architecture. It starts as a simple factory with a switch, which you improve into a Map-based registry so types register themselves instead of editing the factory. The fully evolved form uses Java's ServiceLoader: plugins declare their implementation of a driver SPI, and ServiceLoader discovers and instantiates them at runtime from their own classloader. At that point the host depends only on the interface and has no knowledge of concrete plugins — adding a new platform is dropping in a JAR, with no host recompilation. That's OCP at the architectural level and DIP across a plugin boundary, and because each plugin loads in its own classloader, the factory is also the seam that makes hot-reload work — a new classloader plus fresh ServiceLoader discovery gives you new instances
+
+
+Factory is a creational pattern that decouples object creation from object use — instead of calling new on a concrete class, you ask a factory for an object and get back an abstraction. It solves the problem that new welds your code to a specific implementation, which violates Open/Closed and Dependency Inversion. There are really three variants: Simple Factory, a single method with a switch that picks the concrete type — common but not an official GoF pattern; Factory Method, a real GoF pattern where a base class defers creation to subclasses that each override an abstract create method; and Abstract Factory, which creates whole families of related products that must be consistent, selected by swapping the factory object. In practice, Spring's dependency injection is the Factory pattern scaled to the whole application
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

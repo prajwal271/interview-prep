@@ -1,0 +1,167 @@
+What is @Transactional and Why Does It Exist?
+The Problem Without @Transactional
+
+Imagine borrowing a book from the library. Two things must happen:
+
+Mark book as unavailable
+Create a borrow record
+
+What if step 1 succeeds but step 2 crashes?
+
+Now the book is marked unavailable but no borrow record exists. Data is corrupted. This is the problem transactions solve.
+
+What @Transactional Does
+
+@Transactional
+public BorrowRecord borrowBook(Long userId, Long bookId) {
+    book.setAvailable(false);   // Step 1
+    borrowRepo.save(record);    // Step 2
+}
+
+Spring wraps your entire method in:
+BEGIN;
+  -- step 1
+  -- step 2
+COMMIT;   -- only if BOTH succeed
+ROLLBACK; -- if ANYTHING fails
+
+
+Either ALL steps succeed, or NONE of them apply. This is called Atomicity.
+
+
+Debit your account → Credit receiver's account
+If debit succeeds but credit fails — the bank rolls back the debit. Money returns to you. You never end up in a state where money is gone but receiver didn't get it.
+
+When exception is thrown DB is now corrupted , like inconsistent data across tables
+
+When an exception is thrown in @Transactional method Nothing is saved in the database 
+@Transactional = "All or nothing. If anything fails, pretend nothing ever happened."
+
+						Propagation (REQUIRED vs REQUIRES_NEW)
+What is Propagation?
+When one @Transactional method calls another @Transactional method — what happens to the transaction?
+
+
+@Transactional  // REQUIRED is default
+public void borrowBook() {
+    updateBook();    // joins THIS transaction
+    saveRecord();    // joins THIS transaction
+}
+
+@Transactional  // joins the existing transaction
+public void updateBook() { ... }
+
+If a transaction already exists — join it. If not — create a new one.
+One transaction for everything. If anything fails — everything rolls back.
+
+REQUIRES_NEW
+
+@Transactional
+public void borrowBook() {
+    saveAuditLog();  // runs in its OWN separate transaction
+    updateBook();    // runs in outer transaction
+}
+
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void saveAuditLog() { ... }
+
+Always create a brand new transaction, suspend the outer one.
+So even if borrowBook() rolls back — audit log is already saved separately. 
+
+REQUIRED = You and your friend share one bill at a restaurant. If one can't pay — both leave without eating.
+REQUIRES_NEW = You and your friend have separate bills. If your friend can't pay — you already paid yours. Independent.
+
+
+@Transactional
+public void placeOrder(Order order) {
+    deductInventory();    // outer transaction
+    chargePayment();      // outer transaction
+    sendNotification();   // should this fail the whole order?
+}
+
+
+@Transactional
+public void placeOrder(Order order) {
+    deductInventory();     // outer transaction
+    chargePayment();       // outer transaction
+    sendNotification();    // separate transaction — safe!
+}
+
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void sendNotification() {
+    // if this fails — only notification rolls back
+    // order is NOT affected ✅
+}
+
+REQUIRED → Everything joins one transaction. One fails — all fail.
+REQUIRES_NEW → Inner method gets its own separate transaction. Outer fails — inner is not affected.
+
+Rollback Rules
+
+@Transactional
+public void borrowBook() {
+    book.setAvailable(false);
+    throw new IOException();      // ❌ does NOT rollback!
+    throw new RuntimeException(); // ✅ DOES rollback
+}
+
+@Transactional does NOT rollback for → Checked Exceptions (IOException, SQLException)
+By default @Transactional only rolls back for unchecked exceptions (RuntimeException and its subclasses).
+Checked exceptions (IOException, SQLException) do NOT trigger rollback!
+
+Unchecked		RuntimeException, NullPointerException✅ 		Yes
+Checked			IOException, SQLException❌ 				No by default
+
+
+@Transactional(rollbackFor = IOException.class)
+public void borrowBook() {
+    // now IOException also triggers rollback ✅
+}
+
+Unchecked = Unexpected = Rollback Checked = Expected = Handle it yourself
+
+
+@Transactional works through a proxy. Internal method calls bypass the proxy — so
+@Transactional on internal methods is silently ignored.
+
+@Service
+public class BorrowingService {
+
+    public void processOrder() {     // no @Transactional
+        borrowBook();                // calling own method directly
+    }
+
+    @Transactional
+    public void borrowBook() { ... }
+}
+
+Now the @Transactional means the transactions of the code cannot be rolled back if any issue is there
+
+
+The proxy only intercepts calls coming from outside the class. Calls within the same class never pass through the proxy.
+
+The Annotation works only if the call is happening from outside the class not from inside the class , if the process order is called by some one that proxy never applies only
+
+@Transactional works when the call comes from outside through the proxy. But when processOrder() internally calls borrowBook() — that internal call bypasses the proxy — so borrowBook()'s @Transactional is ignored.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

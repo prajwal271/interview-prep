@@ -1,0 +1,163 @@
+Part 1 — The problem Strategy solves
+Strategy is a behavioural pattern
+
+a test framework that needs to find an element using different locator strategies depending on the platform or situation — by ID, by XPath, by accessibility ID, by a self-healing approach. The behavior (how you locate) varies; the surrounding flow (find it, then act on it) stays the same.
+
+public class ElementFinder {
+
+    public WebElement find(String strategyType, String locator) {
+        if (strategyType.equals("id")) {
+            // logic to find by ID
+            return driver.findElement(By.id(locator));
+
+        } else if (strategyType.equals("xpath")) {
+            // logic to find by XPath
+            return driver.findElement(By.xpath(locator));
+
+        } else if (strategyType.equals("accessibilityId")) {
+            // logic to find by accessibility ID (mobile)
+            return driver.findElement(MobileBy.AccessibilityId(locator));
+
+        } else if (strategyType.equals("selfHealing")) {
+            // complex self-healing logic: try locator, fall back, retry...
+            return selfHealingFind(locator);
+
+        } else {
+            throw new IllegalArgumentException("Unknown strategy: " + strategyType);
+        }
+    }
+}
+
+1. It violates the Open/Closed Principle (Day 64, O). This is the headline problem. When a new locator approach arrives — say imageBased (find by visual matching) — you must reopen ElementFinder and edit this if/else chain. 
+2. One class holds many unrelated algorithms. ElementFinder now contains the ID logic and the XPath logic and the mobile accessibility logic and the entire self-healing algorithm — all crammed into one class
+3. The algorithms can't be reused or tested in isolation
+4. Every algorithm is loaded/coupled even when unused.
+5. You can't change the behavior at runtime cleanly
+
+Extract each algorithm into its own class behind a common interface, and let the using class hold a reference to that interface and delegate to it — so the algorithm can be selected, swapped, injected, and extended without the using class changing.
+
+Strategy solves the problem of behavior that varies, being hard-coded into the class that uses it — typically as a big if/else or switch selecting among algorithms. That violates Open/Closed, because every new algorithm forces you to edit the class; it violates SRP, because one class ends up holding many unrelated algorithms and has many reasons to change; and it couples everything, so the algorithms can't be reused or tested in isolation and an edit to one risks the others. For example, an element finder with an if/else over id, xpath, accessibility-id, and self-healing logic bundles four independent algorithms in one class. Strategy fixes this by extracting each algorithm into its own class behind a common interface, and having the using class hold that interface and delegate to it — so algorithms are selected, injected, swapped at runtime, and extended by adding a class, never editing the user. It's really the Open/Closed and Dependency Inversion principles, plus favoring composition over inheritance, applied to algorithms.
+
+
+Factory: decide which object to create
+
+Strategy: decide how an object behaves
+
+public interface RouteStrategy {
+    String findRoute(String from, String to);
+}
+
+public class FastestRoute implements RouteStrategy {
+    public String findRoute(String from, String to) {
+        return "Fastest route from " + from + " to " + to;
+    }
+}
+
+public class ShortestRoute implements RouteStrategy {
+    public String findRoute(String from, String to) {
+        return "Shortest route from " + from + " to " + to;
+    }
+}
+
+public class NoTollsRoute implements RouteStrategy {
+    public String findRoute(String from, String to) {
+        return "Toll-free route from " + from + " to " + to;
+    }
+}
+
+public class Car {
+    private RouteStrategy routeStrategy;
+
+    public Car(RouteStrategy routeStrategy) {
+        this.routeStrategy = routeStrategy;
+    }
+
+    public void setRouteStrategy(RouteStrategy routeStrategy) {  // swap mid-life
+        this.routeStrategy = routeStrategy;
+    }
+
+    public void navigate(String from, String to) {
+        System.out.println(routeStrategy.findRoute(from, to));   // delegate the "how"
+    }
+}
+
+Car car = new Car(new FastestRoute());
+car.navigate("Mysuru", "Bangalore");        // Fastest route...
+
+car.setRouteStrategy(new NoTollsRoute());    // SAME car, different behavior now
+car.navigate("Mysuru", "Bangalore");        // Toll-free route...
+
+
+The classic Strategy has three roles: a Strategy interface declaring the algorithm, concrete strategy classes each implementing one algorithm, and a Context that holds a reference to the interface and delegates to it.
+
+This is the single most important thing Strategy buys you beyond "nice OCP-compliant structure," and it's what interviewers are really probing when they ask "why Strategy over just subclassing?"
+
+Recall the Context held its strategy in a mutable field with a setter:
+
+Inheritance = behavior chosen once, at object creation, permanent.
+Strategy (composition) = behavior chosen and re-chosen anytime, on a living object.
+
+Strategy's defining advantage over inheritance is runtime swapping — you can change an object's algorithm while the program runs, because the strategy is a field you can reassign. 
+
+Part 4 — Strategy with lambdas
+
+One abstract method. That makes it a functional interface — the exact kind of interface a lambda can implement inline. So instead of writing a named class per algorithm, you can express each strategy as a lambda. Let's make the interface explicit about its intent:
+
+Now instead of separate classes it will become inline lambda functions
+
+@FunctionalInterface
+public interface RouteStrategy {
+    String findRoute(String from, String to);
+}
+
+
+Car car = new Car((from, to) -> "Fastest route from " + from + " to " + to);
+car.navigate("Mysuru", "Bangalore");
+
+car.setRouteStrategy((from, to) -> "Toll-free route from " + from + " to " + to);
+car.navigate("Mysuru", "Bangalore");
+
+
+Because a Strategy interface usually has a single method, it's a functional interface, so in modern Java a lambda can be the strategy — you don't need a named class per algorithm. Instead of an IdLocatorStrategy class, I can write locator -> driver.findElement(By.id(locator)) as a LocatorStrategy directly, and the context is unchanged since it just holds the interface and delegates. Runtime swapping still works because a lambda is an object. The judgment is: lambdas for short, simple algorithms, and named classes for complex, stateful, named, or reused ones like a hundred-line self-healing finder. 
+
+Factory decides which object to create. Strategy decides which algorithm to run on an object you already have.
+
+1. Creational vs behavioral — the category difference
+Factory belongs to the creational family (with Singleton, Builder). Its concern is instantiation — "give me the right object." Once it returns the object, the Factory is done; it doesn't participate in what happens next.
+Strategy belongs to the behavioral family. Its concern is what an object does — "run this algorithm." The strategy stays composed into the Context and is invoked repeatedly to perform behavior over time.
+
+2. Lifespan — one-shot vs ongoing
+Factory is transient: you call create(...), get an object, and the factory's involvement ends. It's a moment of creation.
+Strategy is persistent: the Context holds the strategy as a field and delegates to it on every operation, potentially for the object's whole life — and can swap it (Part 3). The strategy is an ongoing collaborator, not a one-time producer.
+
+3. What they return / hold
+Factory returns a fully-formed object for you to use however you want — often a completely different kind of thing each time (an AndroidDriver, an IOSDriver).
+Strategy is an algorithm the Context calls — the strategies are interchangeable implementations of the same behavior (find by ID vs by XPath), all serving the same purpose differently.
+
+They look similar — both have an interface with several implementations chosen at runtime — but they're different families solving different problems. Factory is creational: it decides which object to create, hands it to you, and its job is done. Strategy is behavioral: it decides which algorithm an object runs, and the context holds that strategy and delegates to it repeatedly, potentially swapping it at runtime. So Factory is one-shot creation, Strategy is ongoing behavior. The test I use is whether I'm choosing something to create and take away — Factory — or to plug in and keep using — Strategy; the method verbs usually tell you, create versus execute. And they frequently collaborate: a factory decides which strategy object to instantiate based on input, and the context uses it. So the factory produces what the strategy pattern consumes — factory selects and creates, strategy structures and executes
+
+Strategy in the real world
+
+1. Comparator + Collections.sort — the definitive example
+
+List<TestResult> results = ...;
+
+results.sort(Comparator.comparing(TestResult::getName));              // strategy A
+results.sort(Comparator.comparing(TestResult::getDuration).reversed()); // strategy B
+results.sort((a, b) -> a.getStatus().compareTo(b.getStatus()));       // strategy C
+
+
+Strategy is everywhere in Java. The definitive example is Comparator with Collections.sort — Comparator is the strategy interface, each comparator is an interchangeable ordering algorithm, and sort is the context that delegates the comparison to whatever comparator you pass. In Spring, injecting an interface that has multiple implementations is Strategy — and the idiomatic trick is injecting a Map of all implementations keyed by bean name, so you select a strategy at runtime and adding a new one is just a new @Component, with no change to the context. In the JDK's concurrency, ThreadPoolExecutor's RejectedExecutionHandler is a Strategy — AbortPolicy, CallerRunsPolicy, DiscardPolicy are interchangeable behaviors the executor delegates to when saturated, and you can plug in your own. Spring Security's PasswordEncoder is another — BCrypt or Argon2 as interchangeable hashing strategies behind one interface. The common signature is an interface for a behavior, several implementations, and a context that holds one and delegates
+
+
+Strategy is a behavioral pattern that defines a family of interchangeable algorithms, puts each behind a common interface, and lets a context hold one and delegate to it — so the algorithm can be selected, injected, and swapped at runtime without changing the code that uses it. It solves the problem of a growing if/else that selects behavior: instead of one class holding every algorithm, each algorithm is its own class, and the context depends only on the interface. It's really Open/Closed and Dependency Inversion applied to algorithms, plus favoring composition over inheritance. The everyday example is Comparator — sorting delegates the ordering decision to whatever comparator strategy you pass in.
+
+
+
+
+
+
+
+
+
+

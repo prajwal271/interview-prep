@@ -1,0 +1,211 @@
+You just declare what each class needs. Spring reads those declarations, figures out the order, creates everything, and hands you a fully wired, ready-to-use application.
+The control of object creation is inverted — instead of YOU controlling it in main(), you hand that control over to Spring.
+Instead of manually creating objects you just annotate the class 
+We just describe what each class needs with the help of constructor 
+
+One Entry Point does everything
+@SpringBootApplication
+this is the entry point for the spring project
+--> Spring now scans all the packages 
+--> Find all annotated classes
+--> Creates objects
+--> wires all the dependencies in correct order 
+
+If you want the bean of a particular class just define and ask for it spring will look for that object and gives it back to you
+like I have done below
+
+@RestController
+public class UserController {
+
+    private final UserService userService;
+
+    // Spring sees this, looks up its managed UserService, injects it
+    public UserController(UserService userService) {
+        this.userService = userService;
+    }
+
+    @PostMapping("/users")
+    public void register(@RequestBody User user) {
+        userService.registerUser(user);
+    }
+
+} 
+
+A bean is just an object that spring creates and manages
+Spring : is a registry of objects it manages all the objects 
+When you find for a bean spring search for that bean in registry and gives that object back to you , that's why Beans are singleton by default.
+
+@SpringBootApplication : It is a combination of 3 annotations it does 3 jobs at once 
+
+@Target(ElementType.TYPE)
+@Retention(RetentionPolicy.RUNTIME)
+@SpringBootConfiguration    // ← Annotation 1
+@EnableAutoConfiguration    // ← Annotation 2
+@ComponentScan              // ← Annotation 3
+public @interface SpringBootApplication {
+    ...
+}
+
+
+@SpringBootConfiguration : Means this is a configuration class , it can define beans 
+@Configuration & @SpringBootConfiguration 
+both are one and the same only you will use this annotation to configure beans in a particular class , if you are annotating a class with SpringBootConfiguration the you are telling that is a config class and it will only define beans internally
+
+When do you use @Bean manually ---> When you need a bean from 3rd party library at that time you cannot annotate the class with @Componnet that time we will use this annotation and use the configuration class to manage all the 3rd party dependencies
+
+@ComponentScan : this annotation is used to scan this package and all the sub packages , find every class annotated with @Component and register the beans
+@ComponentScan(basePackages = {"com.library", "com.utils"})
+this is used to explicitly mention the base packages so that it will scan outside of the packages
+
+@EnableAutoConfiguration : Looks or finds what jars are there in classpath(dependency) , based on what it finds it will automatically configures them 
+to the current application
+
+if datajpa and sql dependency is there : Spring will think the developer might need the database connection to be done it will automatically create the 
+code which is required for connection and transaction 
+
+META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+
+Reads application.properties file for the database credentials and configures that automatically , basically during runtime it will automatically  pick the values from config file like that they have written the code 
+
+Bean Life Cycle
+
+Spring starts
+     ↓
+Finds your class (@Service, @Repository etc.)
+     ↓
+Creates the object (calls constructor)
+     ↓
+Injects dependencies (@Autowired / constructor injection)
+     ↓
+Calls YOUR initialization method (@PostConstruct)
+     ↓
+Bean is READY — your app uses it
+     ↓
+App is shutting down
+     ↓
+Calls YOUR cleanup method (@PreDestroy)
+     ↓
+Bean is destroyed
+
+
+Spring finds the annotated class during component scanning , then it finds that it needs to create object and manage it , still object is not created 
+Spring calling the constructor -- when spring finds the class with constructor it looks at the parameters and thinks there are 2/more other classes fo which the object needs to be created and given to this class
+Spring resolves the order automatically , it will look for class which is not dependent on any other class then it creates the object for that class and then moves on to the next class which has less no of dependent classes like this it will start creating the objects and move on 
+After constructor runs all your dependencies are injected then spring calls the @PostConstruct method --> @PostConstruct is GUARANTEED to run after everything is ready
+This method runs after each and every object is configured then only this method runs 
+Constructor is for assigning dependencies
+PostConstruct is for running logic after the bean is fully ready.
+
+When the bean is ready spring hands them the exact instance , no new creation . Same object every time as the bean is singleton
+
+@PreDestroy : when you stop the application/server or graceful shutdown before destroying each bean , spring calls your @PreDestroy method
+this is the right place to shutdown whatever the thread pools created gracefully , closedb connections
+flush pending data to the db and release the resources which we are holding
+
+Spring bean lifecycle starts with component scanning where Spring finds all annotated classes. It then instantiates each bean by calling its constructor and injecting dependencies. After that, if a @PostConstruct method exists, Spring calls it — this is where initialization logic runs. The bean is then ready and lives in the container for the application's lifetime. On shutdown, Spring calls @PreDestroy giving the bean a chance to release resources before being destroyed.
+
+By default, Spring creates all beans at startup. Every @Service, @Repository, @Controller — all of them get instantiated when your app boots.
+This is called Eager initialization — create everything upfront.
+
+Sometimes your application loads some time to load a particular service which is not required only , it will take 30sec to load that service or creation of beans of that particular service , but service is not used / used rarely so we will make use of lazy loading i.e will load that service whenever that service is called this is called lazy loading
+we will use @Lazy annotation on classes whose beans we rarely require
+Whenever someone call that service that service object is created and cached for further use
+You can use @Lazy not only upon bean but also where that bean is used that place also
+Spring injects a proxy object — a lightweight placeholder. The real bean gets created only when you call an actual method on it.
+Spring injects a proxy instead of the real bean, breaking the eager creation cycle.
+
+Circular Dependency : two services are too tightly coupled. service a depends on service b and service b depends on service a
+
+Solution 1 — Redesign : "Why do these two services need each other?" Usually you can extract the shared logic into a third service:
+
+Solution 2 - @Lazy on One Side , spring creates only one object and will create the other object only when called upon
+
+
+@Component
+    ├── @Service
+    ├── @Repository
+    └── @Controller
+            └── @RestController
+
+All three are literally just @Component with a different name on top. 
+Use @Component when your class doesn't clearly fit into service, repository, or controller category. Utility classes, helpers, converters — these are good candidates for plain @Component.
+
+@Service — Semantic Label for Business Logic ,This class contains business logic. It's the middle layer between controller and repository. Technically Spring creates the bean for both service and component in same way but When someone reads your code they immediately know this class handles business rules.
+
+@Repository : This one actually has extra behavior that @Component doesn't have 
+Without `@Repository`, database exceptions look like this: com.mysql.cj.jdbc.exceptions.CommunicationsException
+
+With `@Repository`, Spring wraps a **PersistenceExceptionTranslationPostProcessor** around your class. This automatically catches all those ugly database exceptions and translates them into Spring's clean exception hierarchy: basically this will create a wrapper around a particular sql exception
+Now your service layer catches DataIntegrityViolationException — it doesn't care whether the database is MySQL, PostgreSQL, or Oracle. The technology detail is hidden.
+
+@Controller tells Spring MVC: "This class handles incoming HTTP requests and returns view names (HTML templates)." 
+@RestController — @Controller + @ResponseBody  | @ResponseBody    // ← return value goes directly to HTTP response body as JSON 
+
+@Controller✅ HTTP request mappingWeb layer (returns views)
+@RestController✅ HTTP + auto JSONWeb layer (returns JSON)
+
+
+@Service, @Repository, and @Controller are all specializations of @Component. Spring discovers and manages them all the same way. The difference is semantic — they communicate the role of the class. @Repository is special because it adds exception translation, converting technology-specific database exceptions into Spring's generic exception hierarchy. @RestController is a combination of @Controller and @ResponseBody, used for REST APIs that return JSON instead of view names.
+
+Bean Factory & Application Context : Both are Spring containers. Their job is the same — create beans, manage them, inject dependencies.But one is the basic version and the other is the full-featured version.
+
+ApplicationContext extends BeanFactory It has everything BeanFactory has, plus more
+
+BeanFactory creates beans only when you ask for them.
+in code you will call factory.getBean that time you will actually create bean and inject 
+
+But this has problems in production level : You have a misconfigured bean — wrong dependency, missing constructor arg , you will find out which bean to create at run time , this will break whatever that you have done because the app might have been running from past 2 hours 
+
+With ApplicationContext: you find out at STARTUP , App refuses to start → you fix it before any user is affected
+Applicationcontext will create all required beans at the startup , singleton beans inject all dependencies , if anything fails will fix at startup at only 
+
+ApplicationContext has a built-in event system. BeanFactory does not. 
+@EventListener will listen to the event published but ApplicationContext and it will be notified
+Internationalization
+AOP support
+Environment/Profile support
+Resource loading
+
+lot of more features it will show 
+
+BEAN Factory : The only real use case is extremely memory-constrained environments like IoT devices or embedded systems where you want absolute minimal startup and don't need enterprise features.
+BeanFactory is the basic Spring container — it creates beans lazily, only when requested. ApplicationContext extends BeanFactory and adds enterprise features like event publishing, AOP support, internationalization, environment profiles, and eager bean initialization at startup. ApplicationContext fails fast — if any bean is misconfigured, the app won't start, which is safer for production. In practice, BeanFactory is almost never used directly. Spring Boot always uses ApplicationContext.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

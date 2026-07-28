@@ -1,0 +1,273 @@
+PART 4 — Lifecycle methods + test instance lifecycle
+
+The problem lifecycle methods solve
+
+@Test void deposit_increasesBalance()  { BankAccount a = new BankAccount(100); ... }
+@Test void withdraw_decreasesBalance() { BankAccount a = new BankAccount(100); ... }
+@Test void overdraft_throws()          { BankAccount a = new BankAccount(100); ... }
+
+That new BankAccount(100) line is repeated in every test. Duplicated setup. If the constructor changes, you edit it everywhere. JUnit gives you hooks that run around your tests so you write shared setup once.
+
+JUnit gives you hooks that run around your tests so you write shared setup once.
+There are four, and they split on two axes — before vs after, and each test vs the whole class:
+
+Around each test 	@BeforeEach 	@AfterEach
+Once for the class  	@BeforeAll 	@AfterAll
+
+All four, with execution order
+
+For this 2-test class, the order is: The code is present in IntelliJ Idea
+@BeforeAll                                  ← once
+    @BeforeEach → deposit test → @AfterEach     ← wraps test 1
+    @BeforeEach → withdraw test → @AfterEach    ← wraps test 2
+@AfterAll                                   ← once
+
+Which hook for what? (interview-relevant matching)
+
+@BeforeEach — anything that must be fresh per test: the object under test, fresh mocks, reset counters. 90% of your setup goes here.
+@AfterEach — undo per-test side effects: close a file/connection a single test opened, reset a static, clear a temp dir.
+@BeforeAll — expensive, read-only, shared setup done once: start an in-memory DB, spin up a test container, load a big config. You do it once because doing it per test would be slow.
+@AfterAll — tear down what @BeforeAll created: stop the DB/container.
+
+
+Why @BeforeEach and not just construct the object inside each test?
+@BeforeEach removes duplication and, more importantly, guarantees a fresh, isolated state for every test — the 'I' in FIRST. Tests must not leak state into each other, and @BeforeEach enforces that automatically.
+
+When would you use @BeforeAll instead of @BeforeEach?
+For expensive setup that's safe to share and doesn't change between tests — like starting a test database or container. Running it per test would be wasteful. Anything mutable that a test could dirty should still go in @BeforeEach.
+
+JUnit creates a brand-new instance of BankAccountTest for every single @Test :
+
+Why does JUnit do this? For isolation. If it reused one instance, a field you set in test 1 would still be there in test 2, and tests could secretly depend on each other (breaking the "I" in FIRST). A fresh instance per test means instance fields can't leak between tests. It's isolation enforced by the framework itself.
+
+Now — this is exactly why @BeforeAll and @AfterAll must be static
+
+Why are @BeforeAll and @AfterAll static?
+Because JUnit 5's default test instance lifecycle is PER_METHOD — it creates a new instance of the test class for each test method to keep them isolated. With no single instance to own them, the 'once for the whole class' hooks must belong to the class, i.e. be static. If you switch to @TestInstance(PER_CLASS), one instance is reused, so those hooks can be non-static.
+
+Trade-off of PER_CLASS?
+It lets @BeforeAll be non-static and share instance state, but that shared state can leak between tests and reintroduce ordering dependencies, so I use it deliberately and keep shared state immutable
+
+Lifecycle + inheritance and multiple hooks (deeper, less common but asked)
+
+Multiple @BeforeEach methods are allowed but their order isn't guaranteed by default — so don't write two @BeforeEach methods that depend on each other's order. (You can force ordering with @Order + @TestMethodOrder, but for setup, just keep it in one method.)
+
+Inheritance: if BankAccountTest extends BaseTest, the parent's @BeforeEach runs before the child's @BeforeEach (outer setup first, like constructors), and @AfterEach runs child-then-parent (reverse). This lets you put common setup in a base test class.
+
+If a base test class and subclass both have @BeforeEach, what's the order?
+Parent's @BeforeEach runs first, then the child's — outside-in, like construction. @AfterEach runs in reverse: child first, then parent.
+
+@Test
+@DisplayName("withdrawing more than the balance throws")   // friendly name in the test report
+void withdraw_overdraft_throws() { ... }
+
+@Test
+@Disabled("flaky — re-enable after TICKET-123")            // skip this test, WITH a reason
+void temporarilyOff() { ... }
+
+@Test
+@Tag("slow")                                               // categorise; CI can include/exclude by tag
+void bigIntegrationStyleTest() { ... }
+
+@DisplayName — readable text (spaces, emojis allowed) shown instead of the method name.
+@Disabled — skips the test (shows as "skipped", not passed or failed)
+@Tag — lets you run subsets: e.g. run only fast-tagged tests on every commit, slow ones nightly.
+
+Difference between @Disabled and deleting a test?
+@Disabled keeps the test in the codebase, visibly skipped with a reason, so it's a reminder to fix and re-enable. Deleting loses the coverage and the intent silently. I disable temporarily with a ticket reference, not permanently.
+
+Assumptions — assumeTrue (and how it differs from assertions)
+An assertion decides pass/fail. An assumption decides whether the test even applies. If an assumption is false, JUnit aborts the test (marks it skipped) — not failed.
+
+
+import static org.junit.jupiter.api.Assumptions.*;
+
+@Test
+void encryptionTest_onlyOnLinux() {
+    assumeTrue(System.getProperty("os.name").contains("Linux"));   // not Linux? → SKIP (not fail)
+    // ... Linux-specific logic and assertions below
+}
+
+
+Use it for tests that are only valid in a certain environment (an OS, a CI flag, a feature toggle). On other environments, skipping is correct — failing would be a false alarm.
+
+Difference between an assumption and an assertion?
+An assertion checks correctness — if it fails, the test FAILS, signalling a bug. An assumption checks a precondition for the test to be meaningful — if it's false, the test is ABORTED/SKIPPED, not failed, because the test simply doesn't apply in that environment. assertTrue fails; assumeTrue skips.
+
+This will be helpful when a class is having multiple test methods if one of the test method fails the whole test fails and further methods will not be checked
+
+PART 5 — Parameterized, repeated & nested tests + naming
+5.1 Parameterized tests — run ONE test against MANY inputs
+The problem. Say you want to verify NumberUtils.isEven for several numbers. The naive way:
+
+@Test void isEven_2()   { assertTrue(NumberUtils.isEven(2)); }
+@Test void isEven_4()   { assertTrue(NumberUtils.isEven(4)); }
+@Test void isEven_100() { assertTrue(NumberUtils.isEven(100)); }
+// ...copy-paste forever
+
+
+@ParameterizedTest                                   // not @Test
+@ValueSource(ints = {2, 4, 6, 100, -8})              // the test runs 5 times, once per int
+void isEven_returnsTrueForEvenNumbers(int number) {  // each value is injected here as 'number'
+    assertTrue(NumberUtils.isEven(number));
+}
+
+@ValueSource supports ints, longs, doubles, strings, booleans, classes, etc. — but only one parameter.
+
+
+
+@CsvSource — multiple arguments per run , If the user needs to input multiple input values for a particular test , and those values are repeatative
+
+
+@ParameterizedTest
+@CsvSource({
+    "2, 3, 5",        //  a,  b, expected
+    "0, 0, 0",
+    "-1, 1, 0",
+    "10, 20, 30"
+})
+void add_addsCorrectly(int a, int b, int expected) {   // 3 columns → 3 parameters
+    assertEquals(expected, new Calculator().add(a, b));
+}
+
+
+@MethodSource — when arguments are objects or computed
+CSV only holds simple literals. When inputs are objects or need computing, supply them from a method that returns a Stream<Arguments>:
+
+
+@ParameterizedTest
+@MethodSource("discountCases")                         // name of the supplier method
+void discount_isCalculated(double price, int percent, double expected) {
+    assertEquals(expected, DiscountCalculator.apply(price, percent), 0.001);
+}
+
+static Stream<Arguments> discountCases() {             // must be static (in PER_METHOD lifecycle)
+    return Stream.of(
+        Arguments.of(100.0, 10, 90.0),                 // each Arguments.of(...) = one run
+        Arguments.of(50.0,  50, 25.0),
+        Arguments.of(0.0,   20, 0.0)
+    );
+}
+
+For method source we will refer a method so that the input values will come from a method written in the test class 
+
+Arguments.of(...) packs the parameters for one run; the stream is the full set of runs.\
+
+@EnumSource — one run per enum constant
+
+@ParameterizedTest
+@EnumSource(Status.class)            // runs once for each constant in Status
+void everyStatus_hasNonNullName(Status status) {
+    assertNotNull(status.name());
+}
+
+
+@ParameterizedTest
+@NullSource                          // injects a single null
+@EmptySource                         // injects "" (and empty collections/arrays for those types)
+@ValueSource(strings = {" ", "   ", "\t"})
+void isBlank_detectsAllBlankForms(String input) {
+    assertTrue(StringUtils.isBlank(input));   // tests null, "", " ", "   ", tab
+}
+
+
+@ParameterizedTest(name = "{0} + {1} = {2}")    // {0},{1},{2} are the parameter values
+@CsvSource({"2, 3, 5", "10, 20, 30"})
+void add(int a, int b, int expected) { ... }
+
+What are parameterized tests and which source would you use when?
+They run the same test body against multiple inputs, eliminating copy-paste and showing each input as a separate result. @ValueSource for one simple arg; @CsvSource for multiple literal args (input + expected); @MethodSource when args are objects or computed; @EnumSource to cover every enum constant; @NullSource/@EmptySource/@NullAndEmptySource for validation edge cases.
+
+Why use parameterized tests over a loop inside one @Test?
+A loop reports one test — the first failing input stops it and you lose which others would fail; the failure message is vague. A parameterized test reports each input independently, so you see exactly which inputs pass and fail, with clear per-case names.
+
+Why must the @MethodSource method be static?
+Because the default PER_METHOD lifecycle creates a new test instance per test, so there's no single instance for an instance-level factory — it must belong to the class. With @TestInstance(PER_CLASS) it can be non-static
+
+@RepeatedTest — run the SAME test N times
+
+
+@RepeatedTest(5)                                     // runs this exact test 5 times
+void shuffle_alwaysProducesValidResult() {
+    assertTrue(Deck.shuffle().isValid());
+}
+
+
+@RepeatedTest(value = 3, name = "run {currentRepetition} of {totalRepetitions}")
+void withInfo(RepetitionInfo info) {                 // optional: know which repetition you're in
+    System.out.println(info.getCurrentRepetition());
+}
+
+
+@RepeatedTest vs @ParameterizedTest?
+@ParameterizedTest varies the input each run; @RepeatedTest repeats the identical test to surface non-determinism — randomness, timing, concurrency. Different intents.
+
+5.3 @Nested — group related tests like chapters
+As a test class grows, dozens of flat methods get hard to scan. @Nested lets you organise tests into inner classes by scenario:
+
+class BankAccountTest {
+
+    BankAccount account;
+
+    @BeforeEach
+    void setUp() { account = new BankAccount(100); }
+
+    @Nested
+    @DisplayName("when depositing")
+    class Deposits {
+        @Test void positiveAmount_increasesBalance() {
+            account.deposit(50);
+            assertEquals(150, account.getBalance());
+        }
+        @Test void nonPositiveAmount_throws() {
+            assertThrows(IllegalArgumentException.class, () -> account.deposit(0));
+        }
+    }
+
+    @Nested
+    @DisplayName("when withdrawing")
+    class Withdrawals {
+        @Test void withinBalance_decreasesBalance() {
+            account.withdraw(40);
+            assertEquals(60, account.getBalance());
+        }
+        @Test void overdraft_throws() {
+            assertThrows(IllegalStateException.class, () -> account.withdraw(500));
+        }
+    }
+}
+
+Nested classes must be non-static inner classes 
+Nested classes must be non-static inner classes (note: no static on class Deposits). Why? A static nested class can't access the outer instance's fields. Being a true inner class lets each @Nested block reach the outer account and the outer @BeforeEach
+
+If it is static class it cannot access outer class instance methods means non-static variables and methods 
+
+Lifecycle nesting: the outer @BeforeEach runs before the nested test's own @BeforeEach (outer-to-inner) — same outside-in ordering as inheritance in Part 4. So shared setup in the outer class applies to all nested tests automatically
+
+
+How do you name tests and why does it matter?
+I name them so the behaviour is obvious without reading the code — typically method_condition_expectedResult — and add @DisplayName for readable reports. Good names make tests serve as living documentation and make failures self-explanatory in CI output.
+
+What makes a bad test name?
+Vague names like test1, testWithdraw, or happyPath — they tell you nothing about the condition or expected outcome, so when CI shows testWithdraw failed you have to open the code to learn what broke.
+
+And use @DisplayName for the human-readable report text (the method name stays code-friendly; the display name is prose):
+
+
+What's @Nested for, and why must nested test classes be non-static inner classes?
+It groups related tests into a readable hierarchy by scenario. They must be non-static inner classes so each nested block can access the outer test instance's fields and lifecycle setup — a static nested class couldn't reach the enclosing instance.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,225 @@
+Kafka is a log, not a queue
+
+topic, partition, offset, broker
+
+So, in plain Kafka terms
+
+Topic = the whole stream of one kind of event (book-borrowed).
+Partition = one of the separate sub-lines that topic is split into. (Physically, each partition is its own file where a chunk of the messages live, in arrival order.)
+Consumer = a reader/worker (your notification-service). One consumer handles one partition at a time.
+More partitions → more consumers can run in parallel → faster.
+
+That's the entire idea of a partition: it exists so you can split the work and have multiple readers go at the same time, instead of one reader being a bottleneck.
+
+Why partitions exist — three reasons, know all three:
+
+Parallelism. Partitions are the unit of parallel work — multiple consumers in a group each read a different partition simultaneously. One partition means one consumer doing everything; ten partitions means up to ten working at once.
+Scalability. Partitions spread across brokers, so a topic's data and load distribute across the cluster instead of sitting on one machine.
+Ordering — the trap. Kafka guarantees order only within a partition, never across partitions. Partition 0's messages are strictly ordered; a message in partition 0 vs one in partition 1 have no guaranteed relative order.
+
+Offset — the bookmark
+Each message in a partition gets a sequential id, its offset (0, 1, 2...). A consumer tracks "partition 0, read up to offset 3" — that stored position is the committed offset. This is how Kafka tracks consumption: not by deleting messages, but by remembering each consumer's bookmark.
+
+Broker — the server
+A broker is one Kafka server. Production clusters have several, with partitions and replicas spread across them. Yours is a single broker on localhost:9092. Related term: replication factor — how many broker copies each partition has (leader + followers) for fault tolerance. Single broker = factor 1 = no redundancy, which is why it's dev-only.
+
+You ran Kafka 4.x in KRaft mode (that one-time format step with cluster UUID mKWLu6gkSFuurfK6R1URqQ). The interview line: older Kafka needed a separate ZooKeeper cluster to store metadata (which broker is alive, who leads each partition). KRaft removes ZooKeeper — Kafka manages its own metadata internally via the Raft consensus protocol (a controller quorum). Fewer moving parts, simpler ops, faster recovery.
+
+Partitions are supermarket checkout lanes. Within one lane, strict FIFO order. Across lanes, no global order — lane 3 may finish someone who arrived after lane 1's current customer. Want one family always ordered relative to each other? Send them to the same lane every time (keying). The offset is your position number in that lane; and the store keeps every receipt forever (the log).
+
+Kafka is an append-only commit log, not a delete-on-read queue — messages persist for a retention period and consumers track an offset instead of removing messages. A topic is split into partitions; partitions are the unit of both parallelism and ordering. Order holds only within a partition, so to order events for a given entity I route them to the same partition via a key. Offsets are per-partition positions consumers commit to mark progress. Brokers are the servers, with partitions and replicas spread across them. I run KRaft mode — no ZooKeeper — so Kafka manages metadata itself through a Raft controller quorum.
+
+which counter does a message go to?
+The Producer (the writer) + Keys
+
+Who's the producer?
+In Part 1, the consumer was the reader (your notification-service). The producer is the writer — the thing that puts messages into the topic. In your project, borrow-service is the producer: when a book gets borrowed, borrow-service writes the "book borrowed" message into Kafka.
+So now the question: when borrow-service writes a message, and the topic has 3 partitions (3 counters), which counter does the message go to?
+
+With a key: same key always goes to the same counter
+A key is a label you attach to each message that tells Kafka which counter to use. Kafka's rule is simple and reliable: same key → always the same partition.
+So if you use the book id as the key:
+
+Every message about book 7 → always counter 1
+Every message about book 12 → always counter 3
+...and so on.
+
+Now all of book 7's events land in the same counter, in the right order — borrow always before return. Different books still spread across counters (so you keep the speed). You get both: parallelism across books, and correct order per book
+
+Think of the key like a loyalty card: no matter when a customer shows up, the card always sends them to their assigned counter, so their history stays in order.
+
+Right now borrow-service probably sends like this — no key:
+kafkaTemplate.send("book-borrowed", event);              // no key → spread randomly
+
+The keyed version is one extra argument — the book id as the key:
+kafkaTemplate.send("book-borrowed", String.valueOf(event.getBookId()), event);
+//                  ^topic          ^key (book id)                      ^the message
+
+That's the whole fix. send(topic, key, value) — the middle argument is the key. Now every event for the same bookId lands in the same partition, in order.
+
+Two more producer settings worth knowing (just the idea)
+When borrow-service writes a message, how sure is it that Kafka actually saved it? That's the acks setting:
+
+acks=0 — "throw it and don't look back." Fastest, but if it's lost, you never know. (Risky.)
+acks=1 — "wait until the main broker confirms it saved." Good balance.
+acks=all — "wait until the broker and its backup copies confirm." Safest, slightly slower.
+
+If a write fails (network blip), the producer automatically tries again. But retries can accidentally write the same message twice. The fix is the idempotent producer (enable.idempotence=true) — Kafka tags each message so duplicates from retries get thrown away. In modern Kafka this is on by default, so you usually get it for free.
+
+You'd set these in application.yml if you want them explicit:
+
+spring:
+  kafka:
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+
+the writer (borrow-service) → producer
+the label that decides which counter → key
+"same key → same counter, so order is kept per book" → key-based partitioning
+how sure the writer is the message was saved → acks (0 / 1 / all)
+auto-retry on failure without creating duplicates → idempotent producer
+
+The producer writes events to a topic. Which partition a message lands in is decided by its key — same key always maps to the same partition. So to keep a given book's events ordered, I use the book id as the key; all events for that book go to one partition in order, while different books still spread across partitions for parallelism. I use acks=all for durability and the idempotent producer so retries don't create duplicate messages.
+
+PART 3 — The Reader Side: Consumer Groups
+A consumer group = a team sharing the work
+
+You've got a topic split into, say, 3 partitions (3 counters). And you want workers to read them. A consumer group is just a team of workers who agree to split a topic's partitions between themselves. The rule Kafka enforces is dead simple:
+Within one group, each partition is read by exactly one worker.
+
+3 partitions + 3 workers in the group → 1 partition each.
+3 partitions + 1 worker → that 1 worker handles all 3 partitions alone. (Slower, but works.)
+3 partitions + 5 workers → 3 work, 2 sit idle. Extra workers beyond the partition count do nothing.
+
+That last line is an interview favorite: the number of partitions is the ceiling on how many workers can run in parallel. Want more parallelism? Add more partitions. If you get more workers then 6 will work 
+In your project, notification-service is a consumer group. Right now you probably run one copy, so that single copy reads all partitions. If you started a second copy, the two would automatically split the partitions between them — that's the scaling payoff.
+
+Here's the part that shows why Kafka keeps messages instead of deleting them. Suppose later you add an analytics-service that also wants every "book borrowed" event — to count stats, not send notifications.
+
+You put it in a different group. And because nothing is deleted, each group gets its own full copy of the stream and its own bookmark. notification-service reads every event to send notices; analytics-service reads the same every event for stats. They don't steal messages from each other — each group tracks its own progress separately.
+Plain rule: within a group, workers split the partitions; across groups, everyone gets everything.
+
+Say you're running 3 workers, one per counter, and one crashes. Kafka notices, and the remaining 2 workers re-divide the 3 counters between them (one takes 2, the other takes 1) so no counter is left unstaffed. When a new worker joins, it re-divides again to share the load.
+That automatic re-shuffling is called rebalancing. There's a brief pause while it happens (nobody reads during the reshuffle), but it means the system heals itself when workers come and go. Manager reassigns counters when a cashier leaves or arrives — same idea.
+
+Offsets & commits — saving your bookmark (this one matters)
+Remember the offset = the bookmark ("I've read up to message 5"). Committing = actually saving that bookmark. There are two ways:
+ -> Auto-commit (Spring's default): Kafka saves your bookmark automatically on a timer. Convenient — but dangerous. It might save "read up to 5" before you've actually finished processing message 5. If your service crashes mid-processing, Kafka thinks 5 is done, and message 5 is silently skipped — a lost notification.
+ -> Manual commit: you decide when to save the bookmark — and you do it only after you've successfully processed the message. Crash before that? The bookmark stays put, so when you restart, you re-read that message and try again. Nothing lost.
+
+For something like notifications, manual commit is the safer choice, because a skipped message = a notification a user never got.
+
+
+Give notification-service an explicit group and turn on manual commit:
+
+spring:
+  kafka:
+    consumer:
+      group-id: notification-service-group   # name your team
+      enable-auto-commit: false              # we'll commit manually
+    listener:
+      ack-mode: manual                        # enable manual acknowledgment
+
+
+Then in the listener, acknowledge after the work succeeds:
+
+
+@KafkaListener(topics = "book-borrowed", groupId = "notification-service-group")
+public void handle(BookBorrowedEvent event, Acknowledgment ack) {
+    saveNotification(event);   // 1. do the real work first
+    ack.acknowledge();         // 2. only NOW save the bookmark (commit the offset)
+}
+
+a team of workers splitting a topic → consumer group
+"one partition → one worker within the group" → partition assignment
+reshuffling counters when workers join/leave → rebalancing
+a separate team that also reads everything → a different consumer group
+saving your "read up to here" bookmark → committing the offset
+commit only after successful processing → manual commit / manual ack
+
+Consumers reading a topic form a consumer group, and within a group each partition is consumed by exactly one consumer — so the partition count caps parallelism. Different groups each receive the full stream independently with their own offsets. When consumers join or leave, Kafka rebalances partition assignments. I prefer manual offset commits over auto-commit for important events: I commit only after the message is successfully processed, so a crash mid-processing causes a reprocess rather than a silently lost message.
+
+PART 4 — Delivery Guarantees (how many times does a message get handled?)
+
+The three guarantees
+1. At-most-once → commit BEFORE processing
+notification-service saves the bookmark first ("done"), then tries to send the notification. 
+If it crashes in between, the bookmark already says "done," so on restart that message is skipped forever. The user gets no notification.
+Never duplicates, but can lose messages. Fastest, riskiest.
+2. At-least-once → commit AFTER processing (this is what you set up in Part 3)
+notification-service sends the notification first, then saves the bookmark.
+If it crashes after sending but before saving the bookmark, then on restart Kafka re-delivers that message → it's processed again → the user gets two notifications.
+Never loses, but can duplicate. The common, safe default.
+3. Exactly-once → processed once, guaranteed
+The dream. And genuinely hard the moment you touch an outside system like your MySQL. Kafka has a feature called "exactly-once semantics," but it really only holds for Kafka → Kafka flows wrapped in a transaction. As soon as you also write to a database and send a notification (outside Kafka), you can't get true exactly-once for free.
+
+The delivery guarantee comes down to when you commit the offset relative to processing. Commit before processing is at-most-once — you can lose messages. Commit after is at-least-once — you never lose, but a crash before commit means reprocessing, so you can get duplicates. True exactly-once is hard once you write to an external system like a database; Kafka's exactly-once semantics really applies to Kafka-to-Kafka transactions. So in practice I run at-least-once and make the consumer idempotent — dedup by a unique event id — which gives exactly-once in effect.
+
+
+PART 5 — Reliability & Error Handling
+This is the "what happens when things go wrong" part — and the last build piece. Same simple style.
+So far we assumed processing works. But what if notification-service tries to handle a message and throws an error? Maybe the DB is momentarily down, or the message has bad data.
+
+Here's the nasty part: with at-least-once, Kafka will just re-deliver that same message again. It fails again. Re-delivered again. Forever. That one bad message — called a poison message — gets stuck at the front of the line and blocks everything behind it. Nothing else gets processed. That's the failure you have to design against.
+
+There are two defenses, used together: retries, then a dead-letter topic.
+
+Defense 1: Retries (for temporary problems)
+Most failures are transient — a DB blip, a network hiccup. They fix themselves in a second. So the first move is simply: try again a few times, with a short wait between tries. Often the 2nd or 3rd attempt succeeds and you're done. 
+Defense 2: Dead-letter topic (for permanently broken messages)
+But what if it keeps failing after, say, 3 retries? The message is genuinely broken. You can't let it block the line forever. So you move it out of the way into a separate topic called a dead-letter topic (DLT) — basically a "problem pile." The main line keeps flowing with the next messages, and someone can inspect the DLT later to see what went wrong.
+
+In the previous part we learnt to send the message at least once what if we need to send exactly once 
+for that we will try to save the notification whether it is sent or not before acknowledgement in db so while retrying we will check that in DB 
+
+@KafkaListener(topics = "book-borrowed", groupId = "notification-service-group")
+public void handle(BookBorrowedEvent event, Acknowledgment ack) {
+    if (notificationRepository.existsByEventId(event.getEventId())) {  // 1
+        ack.acknowledge();                                             // 2
+        return;                                                        // already done — skip
+    }
+    saveNotification(event);                                           // 3
+    ack.acknowledge();                                                 // 4
+}
+
+A failing message under at-least-once gets redelivered endlessly and blocks the partition — a poison message. So I configure a DefaultErrorHandler with a backoff to retry transient failures a few times, and a DeadLetterPublishingRecoverer that routes a message to a .DLT topic once retries are exhausted, so the main flow keeps moving and bad records are quarantined for inspection. For duplicates, the consumer is idempotent — it dedups on a unique event id, backed by a unique constraint in the database — so reprocessing never causes a duplicate side effect
+
+What's a topic and a partition, and why partition at all?
+A topic is a named, append-only log of events. It's split into partitions so multiple consumers can read in parallel — partitions are the unit of both parallelism and ordering. Order is guaranteed only within a partition.
+
+How does Kafka decide which partition a message goes to?
+By the message key — same key always maps to the same partition. I key book-borrowed events by book id, so all of one book's events stay in one partition, in order, while different books spread out for throughput.
+
+What's a consumer group?
+A team of consumers sharing a topic. Within a group, each partition is read by exactly one consumer, so the partition count caps parallelism. Different groups each get the full stream independently with their own offsets.
+
+What's rebalancing?
+When consumers join or leave a group, Kafka redistributes partitions among the remaining members so none is left unassigned. Brief pause while it reshuffles, but it's how the system self-heals.
+
+Auto vs manual offset commit?
+Auto-commit saves the offset on a timer, which can mark a message done before it's actually processed — risking lost messages on a crash. I use manual commit: acknowledge only after successful processing, so a crash causes a reprocess instead of a silent loss.
+
+What are the delivery guarantees?
+At-most-once (commit before processing — can lose), at-least-once (commit after — can duplicate), and exactly-once (hard with an external DB). I run at-least-once and make the consumer idempotent, which gives exactly-once in effect.
+
+How do you get exactly-once in practice?
+I don't chase true exactly-once across Kafka and the database. I dedup on a unique event id — check before saving, plus a unique constraint as a safety net — so a duplicate delivery is a harmless no-op.
+
+What about a message that keeps failing?
+That's a poison message — it would block the partition forever. I configure retries with a backoff for transient failures, and a dead-letter topic for messages that still fail, so the main flow keeps moving and bad records are quarantined.
+
+ZooKeeper or KRaft?
+KRaft — Kafka manages its own metadata via a Raft controller quorum, no separate ZooKeeper. Fewer moving parts.
+
+The client sends POST /api/borrows to the gateway on 8085. The gateway's logging and auth filters run, then it resolves lb://BORROW-SERVICE via Eureka and forwards the request. borrow-service validates the user and decrements the book through Feign clients — protected by Resilience4j circuit breakers — saves the borrow record, and publishes a book-borrowed event to Kafka, keyed by book id so that book's events stay ordered in one partition. notification-service — a consumer group using manual acknowledgment — consumes the event, checks it hasn't already handled that event id (idempotent), saves the notification, then commits the offset. If processing keeps failing, the error handler retries a few times and then routes the message to book-borrowed.DLT so it doesn't block the partition.
+
+
+
+
+A Kafka cluster has to keep some bookkeeping about itself: which brokers are alive, which broker is the leader for each partition, what topics and partitions exist, what the configs are. This bookkeeping is called metadata, and something has to manage it and keep everyone in agreement. The question is just: who does that job? ZooKeeper Originally, Kafka handed that job to a completely separate system called ZooKeeper. So you actually ran two things side by side: your Kafka brokers, plus a ZooKeeper cluster. ZooKeeper was the external coordinator — it stored the metadata and helped elect partition leaders.
+Now with KRaft everything is handled by Kafka Raft ,Kafka now does the metadata job itself, internally .
+
+Kafka needs to manage cluster metadata — live brokers, partition leaders, topic configs. It used to delegate that to a separate ZooKeeper cluster, which meant running two systems and hit scaling and failover limits. KRaft moves metadata management inside Kafka itself, using the Raft consensus protocol across a controller quorum — so no ZooKeeper, fewer moving parts, more partitions, and faster recovery. Kafka 4 is KRaft-only, which is why first startup needs a one-time storage format with a cluster id.
+

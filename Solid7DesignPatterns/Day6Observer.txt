@@ -1,0 +1,288 @@
+Part 1 — The problem Observer solves
+Observer pattern: define a one-to-many relationship between objects so that when one object (the subject) changes state, all its dependents (the observers) are notified automatically.
+
+one thing broadcasts, many things listen. When the broadcaster changes, everyone who subscribed gets told — without the broadcaster needing to know who they are.
+
+Step 1 — the observer contract. Everyone who wants to listen implements this:
+public interface SpeedObserver {
+    void update(int newSpeed);
+}
+
+Step 2 — the observers. Each reacts in its own way to the same event:
+public class Dashboard implements SpeedObserver {
+    public void update(int newSpeed) {
+        System.out.println("Dashboard: showing " + newSpeed + " km/h");
+    }
+}
+
+public class WarningSystem implements SpeedObserver {
+    public void update(int newSpeed) {
+        if (newSpeed > 80)
+            System.out.println("Warning: overspeeding! " + newSpeed + " km/h");
+    }
+}
+
+public class PhoneApp implements SpeedObserver {
+    public void update(int newSpeed) {
+        System.out.println("Phone app: trip speed updated to " + newSpeed);
+    }
+}
+
+Step 3 — the subject (the vehicle). It keeps a list of observers, lets them subscribe/unsubscribe, and notifies all of them when speed changes:
+import java.util.ArrayList;
+import java.util.List;
+
+public class Vehicle {
+    private List<SpeedObserver> observers = new ArrayList<>();
+    private int speed;
+
+    public void addObserver(SpeedObserver o)    { observers.add(o); }
+    public void removeObserver(SpeedObserver o) { observers.remove(o); }
+
+    // in the above methods add or remove whatever the observer that you require
+
+    public void setSpeed(int speed) {
+        this.speed = speed;
+        notifyAllObservers();          // the moment state changes, broadcast
+    }
+
+    private void notifyAllObservers() {
+        for (SpeedObserver o : observers) {
+            o.update(speed);           // tell every listener
+        }
+    }
+}
+
+Step 4 — wiring it up:
+Vehicle car = new Vehicle();
+
+car.addObserver(new Dashboard());
+car.addObserver(new WarningSystem());
+car.addObserver(new PhoneApp());
+
+car.setSpeed(60);
+System.out.println("---");
+car.setSpeed(90);
+
+
+TYPICAL example for this is in our agent killing all the spi once the execution is completed 
+TYPICAL example for strategy pattern in our agent is video recording , in between hybrid execution we will be initializing and executing other platform that in the sense is same as strategy
+
+
+Other example 
+
+Here's the naive version — the TestRun holds direct references to everything that needs updating and calls each one by hand:
+
+public class TestRun {
+    // The TestRun hard-codes a reference to every component that cares:
+    private ConsoleLogger consoleLogger;
+    private CloudinaryUploader uploader;
+    private GitHubDashboard dashboard;
+    private SlackNotifier slackNotifier;
+
+    public TestRun(ConsoleLogger cl, CloudinaryUploader cu,
+                   GitHubDashboard gd, SlackNotifier sn) {
+        this.consoleLogger = cl;
+        this.uploader = cu;
+        this.dashboard = gd;
+        this.slackNotifier = sn;
+    }
+
+    public void onTestFinished(String testName, boolean passed) {
+        // Manually notify each one, by name:
+        consoleLogger.log(testName, passed);
+        uploader.uploadScreenshot(testName);
+        dashboard.updateStatus(testName, passed);
+        slackNotifier.send(testName, passed);
+    }
+}
+
+1. Tight coupling — the source knows every consumer. TestRun holds concrete references to ConsoleLogger, CloudinaryUploader, GitHubDashboard, SlackNotifier. Its job is running tests, yet it's intimately coupled to four unrelated components 
+2. It violates the Open/Closed Principle (Day 64, O). This is the headline. When a fifth consumer appears — say an EmailReporter — you must reopen TestRun: add a field, add a constructor parameter, add a line in onTestFinished. 
+3. TestRun has too many responsibilities (Day 64, S). It runs tests and orchestrates console logging and screenshot uploading and dashboard updates and Slack notifications.
+4. Notice each consumer's method is different — log(...), uploadScreenshot(...), updateStatus(...), send(...). TestRun has to know the exact API of every consumer. There's no uniformity; adding a consumer means learning and calling its specific method. The source is entangled with the shape of every listener.
+5. You can't add/remove listeners at runtime. The listeners are fixed at construction. There's no clean way to say "also notify this new dashboard for the next hour" or "stop notifying Slack during a quiet run." The relationship is hard-wired, not dynamic
+
+The problem is that the source of change (TestRun) is responsible for knowing and calling every consumer. That's backwards. TestRun shouldn't know who is listening or what they do — it should just announce "a test finished" to whoever registered interest, and let each consumer react in its own way.
+
+Invert the relationship: define a common Observer interface, let the source (the Subject) hold a list of observers it knows only through that interface, and let observers subscribe themselves — so when the subject changes, it notifies the list without knowing any concrete consumer, and adding a new consumer means registering it, never editing the subject.
+
+Observer solves the tight coupling that appears when one object needs to notify several others that its state changed. The naive approach has the source hold direct references to every consumer and call each one by hand — which violates Open/Closed because every new listener forces you to edit the source, violates DIP because the source depends on concrete consumers, and bloats the source with responsibilities and each consumer's specific API. The alternative, polling, is worse — it wastes CPU and is laggy. Observer inverts the relationship: it defines a common Observer interface, the subject holds a list of observers it knows only through that interface, and observers subscribe themselves. So when the subject changes it notifies the list uniformly without knowing any concrete consumer, adding a listener is just registering it, and observers can subscribe or unsubscribe at runtime. It's dependency inversion applied to notification — the subject can be built and tested with no knowledge of who will listen.
+
+Part 2 — The classic Observer
+The pattern has four roles:
+
+Observer (interface) — the contract every listener implements; declares the update(...) method the subject calls.
+Concrete Observers — the actual listeners (console logger, uploader, etc.), each implementing update in its own way.
+Subject (interface) — declares the subscribe/unsubscribe/notify machinery.
+Concrete Subject — the source of change (TestRun); holds the observer list and notifies them when its state changes.
+
+public interface TestObserver {
+    void onTestFinished(String testName, boolean passed);
+}
+
+public class ConsoleLoggerObserver implements TestObserver {
+    public void onTestFinished(String testName, boolean passed) {
+        System.out.println(testName + ": " + (passed ? "PASS" : "FAIL"));
+    }
+}
+
+public class CloudinaryUploaderObserver implements TestObserver {
+    public void onTestFinished(String testName, boolean passed) {
+        if (!passed) uploadScreenshot(testName);   // only upload on failure, say
+    }
+}
+
+public class GitHubDashboardObserver implements TestObserver {
+    public void onTestFinished(String testName, boolean passed) {
+        updateDashboard(testName, passed);
+    }
+}
+
+public interface TestSubject {
+    void subscribe(TestObserver observer);     // register a listener
+    void unsubscribe(TestObserver observer);   // remove a listener
+    void notifyObservers(String testName, boolean passed);  // tell everyone
+}
+
+the concrete subject (the source of change)
+
+public class TestRun implements TestSubject {
+    // Holds a list of the ABSTRACTION — not concrete consumers.
+    private final List<TestObserver> observers = new ArrayList<>();
+
+    @Override
+    public void subscribe(TestObserver observer) {
+        observers.add(observer);
+    }
+
+    @Override
+    public void unsubscribe(TestObserver observer) {
+        observers.remove(observer);
+    }
+
+    @Override
+    public void notifyObservers(String testName, boolean passed) {
+        // Loop the list and call the SAME method on each — uniform, no per-consumer API.
+        for (TestObserver observer : observers) {
+            observer.onTestFinished(testName, passed);
+        }
+    }
+
+    // The actual business logic — when a test finishes, announce it.
+    public void runTest(String testName) {
+        boolean passed = executeTest(testName);   // do the real work
+        notifyObservers(testName, passed);        // then broadcast — that's all
+    }
+}
+
+
+TestRun testRun = new TestRun();
+
+// Observers subscribe THEMSELVES — the subject didn't name any of them:
+testRun.subscribe(new ConsoleLoggerObserver());
+testRun.subscribe(new CloudinaryUploaderObserver());
+testRun.subscribe(new GitHubDashboardObserver());
+
+testRun.runTest("LoginTest");
+// → executes the test, then notifies all three observers automatically.
+// Each reacts in its own way; TestRun knows none of the specifics.
+
+a fifth consumer arrives (the EmailReporter from Part 1's problem #2):
+
+public class EmailReporterObserver implements TestObserver {
+    public void onTestFinished(String testName, boolean passed) {
+        if (!passed) sendEmail(testName);
+    }
+}
+
+// Just subscribe it — TestRun is NOT touched:
+testRun.subscribe(new EmailReporterObserver());
+
+The classic Observer has four roles: an Observer interface with an update method, concrete observers implementing it, a Subject interface with subscribe/unsubscribe/notify, and a concrete subject that holds a list of observers and notifies them on state change. For example, a TestObserver interface with onTestFinished, concrete ConsoleLogger, CloudinaryUploader, and Dashboard observers, and a TestRun subject that holds a List<TestObserver>, exposes subscribe/unsubscribe, and loops the list calling onTestFinished when a test completes. The subject holds the interface type, so it depends only on the abstraction and calls one uniform method rather than each consumer's specific API — it announces an event instead of orchestrating consumers. Adding a listener is a new class plus a subscribe call, with the subject untouched, and observers can unsubscribe at runtime. In production I iterate over a copy or a CopyOnWriteArrayList to avoid ConcurrentModificationException if an observer unsubscribes during notification, and wrap each notification in a try/catch so one failing observer doesn't block the rest.
+
+Part 3 — Push vs pull
+The push model
+The subject sends the data to the observers as parameters of the notification method. This is what we built in Part 2:
+
+public interface TestObserver {
+    void onTestFinished(String testName, boolean passed);   // data is PUSHED in
+}
+
+// Subject pushes the specifics to every observer:
+observer.onTestFinished("LoginTest", false);
+
+The subject must guess what observers want. It decides the parameter list (testName, passed) up front. If a new observer needs the test duration too, you must change the interface — add a parameter — which forces every observer to update its signature. That's an OCP problem creeping back in at the interface level.
+Can over-send. If you push a big bundle of data "just in case," observers that only care about one field still receive (and the subject still assembles) everything. Wasteful when observers need different subsets.
+
+The pull model
+The subject sends minimal signal — often just a reference to itself — and each observer pulls the specific data it cares about by querying the subject:
+
+public interface TestObserver {
+    void onUpdate(TestRun subject);   // subject passes ITSELF; no specific data
+}
+
+// Each observer pulls exactly what IT needs from the subject:
+public class DurationReportObserver implements TestObserver {
+    public void onUpdate(TestRun subject) {
+        long duration = subject.getLastDuration();   // pulls only duration
+        // ... use it
+    }
+}
+
+public class NameLoggerObserver implements TestObserver {
+    public void onUpdate(TestRun subject) {
+        String name = subject.getLastTestName();     // pulls only the name
+    }
+}
+
+Push vs pull is about how much the subject sends when it notifies. In push, the subject sends the changed data as arguments — simple, and the observer doesn't even need a reference to the subject, but the subject has to guess what observers want, and adding a new data need means changing the interface for everyone. In pull, the subject just signals 'I changed,' often passing itself, and each observer queries the subject for the data it needs — the interface stays stable as observer needs evolve, but observers become coupled to the subject's API and there are extra callbacks, with possible races if state changes again before the pull. Push suits small, uniform, stable data needs; pull suits diverse or evolving ones. In practice I use the hybrid: push a small immutable event object that carries the data. That gives push's simplicity and observer independence while letting me add fields to the event without breaking existing observers — which is exactly how Spring's ApplicationEvent and Kafka messages work.
+
+
+Risk 1 — the memory leak (the "lapsed listener" problem)
+Observers must be unsubscribed once it is used because they can be garbage collected
+
+Risk 2 — notification order is undefined (and depending on it is a trap)
+
+Observer's payoff is loose coupling — the subject depends only on the observer interface, so it satisfies OCP and DIP and can be built and tested knowing nothing about its listeners. But that same not-knowing creates three classic risks. The biggest is the lapsed-listener memory leak: the subject holds references to its observers, so an observer that's logically done but never unsubscribed can't be garbage-collected and keeps getting notified — you defend by always unsubscribing, often in a finally block, or by holding observers via weak references. Second, notification order is undefined, so observers must never depend on running before or after another; if you truly need order, make it explicit with something like @Order rather than relying on list order. Third, cascading or re-entrant updates can cause infinite loops or ConcurrentModificationException — you avoid observers that mutate the subject they observe, iterate over a copy or a CopyOnWriteArrayList, and wrap each notification in a try/catch so one failing observer doesn't block the rest. Underneath it all, Observer trades explicit control flow for decoupling, which is also why event systems are harder to debug.
+
+Observer in the real world
+1. UI event listeners — the most familiar ObserverEvery button click handler you've ever written is Observer:
+2. PropertyChangeListener — the JDK's built-in Observer
+3. Spring ApplicationEvent / @EventListener — Observer as a framework feature
+
+1. Don't use Observer when a direct call is clearer
+2. Don't use Observer when the indirection makes debugging too costly
+3. Don't use Observer for simple, synchronous, sequential logic
+
+Observer is a behavioral pattern that defines a one-to-many dependency: when one object — the subject — changes state, all its registered observers are notified automatically. Instead of the source hard-coding references to everything that needs updating, it holds a list of observers behind a common interface, and observers subscribe themselves — so the subject notifies them without knowing their concrete types, and adding a listener means subscribing one, never editing the subject. It's dependency inversion applied to notification, and it's the foundation of event listeners, Spring's application events, and reactive streams. The everyday example is a UI button with addActionListener
+
+"What problem does it solve?" → (Part 1) A source that needs to notify several others, hard-coding a reference to each, violates OCP (every new listener edits the source) and DIP (the source depends on concrete consumers), and bloats the source. 
+"How is it structured?" → (Part 2) Four roles: an Observer interface with an update method, concrete observers, a Subject interface with subscribe/unsubscribe/notify, and a concrete subject holding a List<Observer> that it loops over, calling one uniform method. The subject depends only on the interface, so adding a listener is a new class plus a subscribe call.
+"Push or pull?" → (Part 3) Push sends the changed data as arguments — simple, observer needs no reference to the subject, but the interface churns when data needs change. Pull sends just a signal (often the subject itself) and observers query for what they need — stable interface, but tighter coupling and extra callbacks. In practice I push an immutable event object, which gives push's simplicity while letting me add fields without breaking existing observers — how Spring events and Kafka messages work
+"What are the risks?" → (Part 4 — lead with the leak) The biggest is the lapsed-listener memory leak: the subject holds references to observers, so one that's logically done but never unsubscribed can't be garbage-collected and keeps being notified — defend by always unsubscribing (often in finally) or holding observers via weak references. Also: notification order is undefined, so observers must be order-independent (use @Order if you truly need sequence); and cascading or re-entrant updates can cause infinite loops or ConcurrentModificationException — iterate over a copy or CopyOnWriteArrayList, and wrap each notification in try/catch so one failing observer doesn't block the rest.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

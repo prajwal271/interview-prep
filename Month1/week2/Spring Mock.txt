@@ -1,0 +1,86 @@
+@Controller is a Spring stereotype annotation that marks a class as a web controller. It returns a view name, which Spring resolves to an HTML template. @RestController adds @ResponseBody to every method, so instead of resolving a view, Spring uses Jackson to convert the return value to JSON and writes it directly to the response. For REST APIs we use @RestController because clients expect JSON data, not HTML pages.
+
+HTTP Request Flow in Spring Boot
+
+Request arrives at Tomcat
+Spring Boot has an embedded Tomcat server. Every HTTP request hits Tomcat first.
+
+Tomcat hands it to DispatcherServlet
+DispatcherServlet is Spring's front controller. Every single request goes through it. There is only one.
+
+DispatcherServlet asks HandlerMapping
+Which controller method handles this URL? HandlerMapping scans your @RequestMapping, @GetMapping, @PostMapping etc. and returns the correct method.
+
+HandlerAdapter invokes the method
+HandlerAdapter actually calls your controller method. It also handles things like converting @RequestBody JSON → Java object (using Jackson).
+
+Your controller method runs
+Your business logic executes. It returns either a value or a ResponseEntity.
+
+@ResponseBody / Jackson converts return value
+Since you used @RestController, Jackson converts your Java object → JSON automatically.
+
+Response goes back through Tomcat to the client
+The JSON response is sent back with the correct HTTP status code.
+
+Request → Tomcat → DispatcherServlet → HandlerMapping → HandlerAdapter → Controller → Jackson → Response
+
+
+@ControllerAdvice — Global Exception Handling
+Without @ControllerAdvice — every controller handles its own errors
+
+// With @ControllerAdvice — one place handles ALL exceptions
+@ControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(BookNotFoundException.class)
+    public ResponseEntity<String> handleBookNotFound(BookNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage()); // 404
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<String> handleGeneral(Exception ex) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Something went wrong"); // 500
+    }
+}
+
+
+Any Exception thrown anywhere
+        ↓
+DispatcherServlet catches it
+        ↓
+Looks for @ControllerAdvice class
+        ↓
+Finds matching @ExceptionHandler method
+        ↓
+Returns your custom response
+
+
+@ControllerAdvice is a centralized exception handling mechanism. Instead of writing try-catch in every controller, you define @ExceptionHandler methods in one class. When any exception is thrown, Spring automatically routes it to the correct handler. This keeps controllers clean and error responses consistent across the entire application.
+
+Filters run at the servlet level before Spring touches the request — ideal for JWT validation and CORS. Interceptors run inside Spring after DispatcherServlet — ideal for logging and role checks because they have access to Spring beans and know which controller method is being called.
+
+
+			Filter				Interceptor
+Lives at		Servlet level			Spring level
+Access to Spring beans	❌ No				✅ Yes	
+RunsBefore		 DispatcherServlet		After DispatcherServlet	
+Use for			JWT, CORS, encoding		Logging, auth checks, metrics
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,299 @@
+Flyway Migrations 
+
+Imagine you have 3 environments:
+
+Your laptop (dev)
+Testing server
+Production server
+
+You add a new column to your database on your laptop: ALTER TABLE books ADD COLUMN isbn VARCHAR(20); 
+Now your code works on your laptop. But testing and production servers don't have this column yet!
+Your app crashes in testing and production. This is the problem Flyway solves
+
+What Flyway Does
+Flyway keeps your database changes versioned — just like Git keeps your code versioned.
+Every DB change goes into a numbered SQL file:
+V1__create_books.sql
+V2__create_users.sql
+V3__create_borrow_records.sql
+V4__add_indexes.sql
+V5__add_constraints.sql
+
+When your app starts — Flyway checks which migrations have already run and automatically runs the missing ones.
+Testing server missing V4 and V5?
+→ Flyway runs V4, then V5 automatically ✅
+
+How Flyway Tracks This
+Flyway creates a special table in your DB :
+
+SELECT * FROM flyway_schema_history;
+
+version | description        | success
+--------|-------------------|--------
+1       | create books      | true
+2       | create users      | true
+3       | create borrows    | true
+4       | add indexes       | true ← just ran
+5       | add constraints   | true ← just ran
+
+Every migration that has run is recorded here. Flyway never runs the same migration twice.
+
+you write every DB change into a numbered file:
+V1__create_books.sql       ← Day 1 change
+V2__create_users.sql       ← Day 2 change
+V3__add_isbn_to_books.sql  ← Day 3 change
+
+When someone runs the app
+Flyway reads these files and runs them automatically in order. His database is now identical to yours. 
+
+How Does Flyway Know Which Files To Run?
+This is the key part. When your Spring Boot app starts — Flyway does exactly 4 things:
+
+Step 1 :  Look At Your Migration Folder
+Flyway scans src/main/resources/db/migration and finds all your V files:
+	V1__create_books.sql
+	V2__create_users.sql
+	V3__create_borrow_records.sql
+
+Step 2 — Check flyway_schema_history Table
+Flyway looks in your database for a special table it manages called flyway_schema_history.
+
+First time ever running → table doesn't exist → Flyway creates it → table is empty.
+Second time running → table exists → Flyway reads what has already run:
+
+Step 3 — Compare and Find Missing Migrations
+Flyway compares:
+	Files in your migration folder
+	What's already in flyway_schema_history
+
+Files found:    V1, V2, V3
+Already ran:    V1, V2
+Missing:        V3  ← Flyway will run this!
+
+Step 4 — Run Missing Migrations In Order
+Flyway runs V3 SQL against your database:
+After running — Flyway records it in flyway_schema_history:
+
+Why Never Edit A Migration File?
+Remember the checksum column in flyway_schema_history?
+version | checksum
+--------|----------
+1       | abc123   ← Flyway calculated this from V1 file content
+
+When app starts — Flyway recalculates checksum of V1 file and compares:
+Stored checksum:      abc123
+Recalculated checksum: xyz999  ← YOU EDITED THE FILE!
+
+💥 ERROR — Flyway refuses to start!
+
+Flyway thinks something is wrong — someone tampered with history. It stops your app from starting to protect your database.
+
+
+App Starts
+    ↓
+Flyway scans db/migration folder
+    ↓
+Flyway checks flyway_schema_history table
+    ↓
+Compares files vs history
+    ↓
+Missing migrations? → Run them in order → Record in history
+No missing migrations? → Do nothing → App starts normally
+
+For Flyway set up 
+
+# application.yml
+spring:
+  flyway:
+    enabled: true
+    locations: classpath:db/migration  # where your SQL files live
+
+<!-- pom.xml -->
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-core</artifactId>
+</dependency>
+
+
+				HikariCP Connection Pooling
+
+Every time your app talks to the database — it needs a connection.
+Creating a connection is expensive:
+
+1. Open network socket
+2. TCP handshake
+3. Authenticate with DB
+4. Ready to use
+
+This takes ~100-200ms every single time!
+Now imagine 1000 users hitting your API simultaneously:
+
+1000 requests → 1000 connections created → 1000 × 200ms
+→ Database gets overwhelmed 💥
+→ App becomes extremely slow 💥
+
+What Connection Pooling Does : Instead of creating a new connection every time — create connections once, reuse them forever.
+
+App Starts → HikariCP creates 10 connections → keeps them ready
+
+Request 1 comes → borrows connection 3 → uses it → returns it
+Request 2 comes → borrows connection 3 → uses it → returns it
+Request 3 comes → borrows connection 7 → uses it → returns it
+
+Connections are never closed — just borrowed and returned.
+
+Think of a taxi stand at an airport.
+	Every passenger calls a car factory, builds a new taxi, uses it once, destroys it.
+	10 taxis wait at the stand. Passenger arrives → takes a taxi → returns it → next passenger uses same taxi.
+Taxis are your connections. Stand is your pool.
+
+
+Spring Boot uses HikariCP by default — you don't need to add anything!
+
+# application.yml — HikariCP configuration
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/librarydb
+    username: postgres
+    password: yourpassword
+    hikari:
+      maximum-pool-size: 10      # max connections in pool
+      minimum-idle: 5            # min connections always ready
+      connection-timeout: 30000  # wait 30s for connection before error
+      idle-timeout: 600000       # close idle connection after 10 mins
+      max-lifetime: 1800000      # connection lives max 30 mins
+
+
+
+What Happens Step by Step
+
+App starts:
+
+HikariCP creates 5 connections (minimum-idle)
+Pool: [C1, C2, C3, C4, C5] — all free
+
+Request 1 arrives:
+
+HikariCP gives C1 to request
+Pool: [C2, C3, C4, C5] — C1 is busy
+
+Request 2 arrives:
+
+HikariCP gives C2 to request
+Pool: [C3, C4, C5] — C1, C2 busy
+
+Request 1 finishes:
+
+C1 returned to pool
+Pool: [C1, C3, C4, C5] — ready again
+
+What If Pool Is Full?
+All 10 connections are busy and request 11 arrives:
+
+Request 11 → no connection available → WAITS
+↓
+waits up to connection-timeout (30 seconds)
+↓
+connection becomes free → request 11 gets it ✅
+OR
+30 seconds pass → SQLTimeoutException ❌
+
+How to choose pool size 
+pool size = number of CPU cores × 2 + 1
+
+How To Monitor Your Pool
+# application.yml
+logging:
+  level:
+    com.zaxxer.hikari: DEBUG  # shows pool activity in logs
+
+Logs : HikariPool - Pool stats (total=10, active=3, idle=7, waiting=0)
+
+Requests wait up to connection-timeout (default 30 seconds). If no connection is free by then → SQLTimeoutException is thrown.
+
+HikariCP solves the problem of creating a new TCP connection to the database on every request, which is slow and expensive. Instead, HikariCP creates a pool of connections at startup and keeps them alive. When a request comes in it borrows a connection from the pool, uses it, and returns it. If all connections are busy the request waits up to 30 seconds. If still no connection is free it throws SQLTimeoutException.
+
+
+
+What Is a Connection Pool?
+Every time your app talks to the DB, it needs a connection (a TCP socket + auth handshake to PostgreSQL).Opening a new connection takes ~50-100ms — that's slow for an API that should respond in 20ms!If you opened a fresh connection per request:
+
+Client request → 50ms (connect) → 5ms (query) → 5ms (close) → response
+                  ↑ 90% of time wasted on connect/disconnect 💀
+
+Solution: keep a pool of pre-opened connections.
+[Pool of 10 connections, always alive]
+    ↓
+Request 1 → borrow conn → query → return conn
+Request 2 → borrow conn → query → return conn
+Request 3 → borrow conn → query → return conn
+
+HikariCP is the fastest connection pool for Java, by a wide margin
+
+Default in Spring Boot since 2.0 — you're already using it without configuring anything
+Benchmarked as 2-3x faster than alternatives (C3P0, DBCP)
+Tiny library (~150KB) but extremely well-engineered
+You haven't been writing pool code because Spring Boot wired it up automatically. 
+
+# HikariCP-specific tuning
+spring.datasource.hikari.pool-name=LibraryHikariPool
+spring.datasource.hikari.maximum-pool-size=10
+spring.datasource.hikari.minimum-idle=5
+spring.datasource.hikari.idle-timeout=600000
+spring.datasource.hikari.max-lifetime=1800000
+spring.datasource.hikari.connection-timeout=30000
+spring.datasource.hikari.leak-detection-threshold=60000
+
+Spring Boot reads these and configures HikariCP at startup.
+
+maximum-pool-size		10		Max simultaneous connections
+minimum-idle			same as max	Min connections kept alive even if unused
+connection-timeout		30s		How long to wait when pool is exhausted before throwing
+idle-timeout			10min		Idle connections beyond this are closed
+max-lifetime			30min		Max age of any connection (then recycled)
+leak-detection-threshold	0 (off)		Warn if a connection is held longer than this
+
+Why a Smaller Pool Is Often Faster
+If your DB has only 4 CPU cores, having 100 connections doesn't help — they all queue for those 4 cores. You just get lock contention and context switching overhead.
+connections = (core_count × 2) + effective_spindle_count
+For a typical 4-core DB server with SSD: ~10 connections.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

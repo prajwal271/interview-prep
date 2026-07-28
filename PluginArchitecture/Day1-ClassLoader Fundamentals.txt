@@ -1,0 +1,492 @@
+Part 1 :  What a "plugin" actually is, and why plugin architecture exists
+
+PLUGIN : A plugin is a self-contained unit of code (in Java, almost always a JAR) that implements a contract defined by a host application, and is discovered and loaded at runtime rather than being baked into the app at compile time.
+
+The three roles — the mental model to burn in
+	Every plugin system, no matter how fancy, is just three roles talking to each other:
+  1) Host (the core app) — owns the lifecycle. It decides when to look for plugins, where to load them from, and when to call them.
+  2) Contract (the API) — a small set of interfaces (occasionally abstract classes) the host publishes. This is the only thing the host and the plugin both 	agree on. The host writes its code against this interface and never against any concrete plugin.
+  3) Plugin — a concrete implementation of the contract, packaged separately, loaded at runtime.
+
+The single most important relationship here is the direction of dependencies:
+ 
+The host depends on the contract.
+The plugin depends on the contract.
+The host does not depend on the plugin.
+
+Every plugin system makes five choices
+-> Source — where do plugins come from? A local directory, a remote URL, a database blob.
+-> Timing — loaded eagerly at startup, or lazily on first use?
+-> Discovery — how does the host find them? A config file, a naming convention, or ServiceLoader/SPI 
+-> Isolation — do all plugins share one ClassLoader, or does each get its own? (This single choice decides whether two plugins can quietly break each other.)
+-> Lifecycle — load only, or load and unload and hot-reload? (Hot reload = the hard mode you'll reach at the end of the week.) 
+
+
+"discovered and loaded at runtime." : Ordinary Java can't do that. The classpath is frozen the moment the JVM boots — you cannot hand javac a JAR that doesn't exist yet. So something has to take a JAR the app never knew about, read its raw bytes, and turn them into live Class objects inside the already-running JVM.
+That "something" is the ClassLoader. Every one of the five design choices above ultimately routes through it. That's why a week labeled "plugin architecture" is really a week about classloaders — and why Part 2 opens that box: what actually happens when the JVM loads a class.
+
+Part 2 — The class lifecycle: from bytes on disk to a live class
+
+JVM does not load everything up front. A class goes through this entire lifecycle the first time it's actively used, lazily, one class at a time.Your app can run for minutes before a given class is ever touched — and if it's never touched, it's never loaded. So there's no "load the whole project" moment; there's a stream of "this specific class is needed now" moments.
+
+When a class is needed, it moves through five phases, in this order:
+
+Loading --> Verification --> Preparation --> Resolution --> Initialization 
+1) (L) Read bytes and create class objects 
+2) (V) Check whether the byte code is safe or not
+3) (P) Static fields will be initialized to default value
+4) (R) Symbolic refs will be done as Direct refs
+5) (I) Will run the static initializers
+
+The three middle layers are called linking ( Verification , Preparation , Resolution ) Loading, Linking, Initialization
+
+1. Loading
+The ClassLoader is handed a fully-qualified name, e.g. com.example.Config. Find the raw bytes of that class and read them in. Where from? A folder, a JAR, a network stream — the ClassLoader decides, and that freedom is exactly what makes plugins possible (and is why URLClassLoader exists: it knows how to fetch bytes from URLs). Once it has the bytes, the JVM builds an in-memory representation and creates a Class<?> object on the heap to represent the type.
+
+The trick is Class.forName(name, initialize, loader). Passing initialize = false forces the class to load and link but stop before initialization — so you can prove the Class object exists while the static block still hasn't run.
+
+class Plugin {
+    static { System.out.println(">> Plugin is being INITIALIZED (static block ran)"); }
+    Plugin() { System.out.println(">> Plugin INSTANCE created"); }
+}
+
+ClassLoader loader = LoadingDemo.class.getClassLoader();
+Class<?> c = Class.forName("Plugin", false, loader);
+
+but the static block has not ran
+
+This gap is the loading phase standing on its own. The bytes were read and a Class was built; nothing in the class has run. This is the same distinction that made Class.forName (init) work for JDBC while loadClass (no init) wouldn't
+
+2. Verification
+Before the JVM will trust this bytecode, it inspects it. The bytecode verifier confirms the class is structurally sound and can't corrupt the JVM: the bytecode is well-formed, the operand stack never underflows or overflows, types are used consistently, final classes aren't subclassed, access modifiers are respected, and so on.
+Why this phase exists at all is a plugin-architecture point: bytecode can come from anywhere — including an untrusted JAR pulled off a network. The JVM assumes nothing is trustworthy and verifies it. This is a big part of why loading third-party plugins isn't instantly catastrophic. (This is also why hand-crafted or corrupt bytecode throws VerifyError.)
+
+Verification is the phase people gloss over because it's invisible when it works — but it's the reason the whole JVM is both fast and safe, and once you've hit a VerifyError in production (you will, given the tools you run) you'll want to know exactly what it's telling you.
+
+A .class file is just bytes, and javac is not the only thing that produces them. Those bytes can be hand-assembled, generated at runtime by a library, rewritten by a Java agent, corrupted in transit, or crafted by an attacker. The JVM cannot assume a well-behaved compiler made them.
+
+The JVM's execution engine is fast precisely because, while running, it does not re-check types on every instruction — it trusts that the bytecode is already well-typed and stack-safe. That trust has to be earned somewhere. Verification is that somewhere: prove safety once, at link time, so the engine can run without per-instruction safety checks forever after. Verify once, run fast always. That's the whole bargain.
+
+If you skip it isn't a tidy Java exception — it's memory corruption, JVM crashes, and sandbox escapes. If bytecode could treat an int as a pointer, it could read arbitrary memory. If it could pop from an empty stack, it'd read whatever garbage is underneath. Verification exists to make those states unreachable.
+
+-> Format checks : Broken format → ClassFormatError; compiled-for-a-newer-JVM → UnsupportedClassVersionError
+-> Semantic checks: every class except Object has a superclass; final classes aren't subclassed; final methods aren't overridden; a class isn't both final and abstract; and so on.
+-> Bytecode data-flow verification:
+-> Symbolic-reference checks: that referenced methods and fields actually exist and are accessible
+
+3. Preparation — the one people get wrong
+Preparation allocates memory for the class's static fields and sets each to its default zero value — 0, 0L, false, '\u0000', null. That's it.
+Read this carefully: given static int retries = 3;, after preparation retries is 0, not 3. Your assigned value 3 is not applied here. Memory is reserved and zeroed; nothing you wrote in code runs yet. The = 3 happens later, in initialization. Confusing preparation with initialization is the single most common misunderstanding of this whole lifecycle, so lock in: preparation = defaults; initialization = your actual values.
+
+4. Resolution 
+When javac compiles a class, it can't write memory addresses into the bytecode — it has no idea where String or PrintStream will live when your program eventually runs. So it writes descriptions into the constant pool instead.
+
+class Order {
+    void process() {
+        Payment p = new Payment();
+        p.charge(100);
+    }
+}
+
+"takes one int, returns void." Notice there is nothing here pointing at real memory. Order knows only the name and shape of what it wants to call. That's a symbolic reference: a promise — "somewhere there's a class Payment with a method charge(int)" — not a link.
+
+	Remember from Loading that references to other classes were stored as names (symbolic references, living in the class's constant pool). Resolution turns each symbolic reference — "the class named java.lang.String", "the method println on PrintStream" — into a direct reference: an actual pointer to the already-loaded target. Resolving a reference may itself trigger the loading of another class (you can't link to String until String is loaded).
+	One honesty note: the spec permits resolution to be lazy — a JVM may defer resolving a reference until the instant it's first used, rather than eagerly in this phase. So while the textbook order is Verify → Prepare → Resolve, real JVMs often resolve on demand. Don't over-index on exact resolution timing; do lock in what resolution does
+
+
+5. Initialization — where your code finally runs
+Now the JVM runs the class's static initializers: your static field assignments (= 3) and any static { ... } blocks, in the textual order they appear. The compiler bundles all of these into one synthetic method called <clinit> ("class init"), and initialization is simply "run <clinit>."
+
+Three guarantees worth memorizing:
+-> Exactly once. <clinit> runs a single time per class, ever.
+-> Thread-safe. The JVM locks around it, so if two threads race to trigger initialization, one runs <clinit> and the other waits. (This guarantee is the entire basis of the "initialization-on-demand holder" singleton idiom — the JVM does your locking for free.)
+-> Superclass first. Initializing a class initializes its superclass first, all the way up.
+
+class Config {
+    static int retries = 3;
+    static { System.out.println("Config <clinit> running"); }
+}
+
+After Loading: Config Class object exists; structure known.
+After Verification: bytecode confirmed safe.
+After Preparation: retries == 0. Nothing printed. The static block has not run.
+After Resolution: the reference to System/PrintStream is linked up.
+After Initialization: <clinit> runs → retries becomes 3, and "Config <clinit> running" prints
+
+If you could pause the JVM between preparation and initialization and read Config.retries, you'd see 0. That's not a bug — that's the spec.
+
+Part 3 — The ClassLoader hierarchy
+
+The first correction: there is no the ClassLoader. A running JVM has multiple classloaders arranged as a parent-child chain. When your code says SomeClass.class.getClassLoader(), you get one specific loader — but it sits in a lineage, and which loader loaded a class carries real meaning
+
+There are three built-in loaders, top to bottom:
+
+Before that we will see how java works
+
+javac HelloWorld.java --> Compiling of java code so that it will create byte code 
+java HelloWorld --> We will now tell the java launcher to look for HelloWord class 
+	First it starts a JVM instance
+	Then the class loader subsystem goes looking for HelloWorld on the classpath, finds HelloWorld.class, reads the bytes, and loads it into the 	method area , then it will do what the actual class loaders work was there properly
+	Finally, the JVM locates the public static void main(String[] args) method  and the execution engine starts executing the main method 
+	The interpreter is the JVM's default way of running bytecode: it reads one bytecode instruction, decodes what it means, performs the equivalent 	native action, then moves to the next instruction
+	The JIT (Just-In-Time compiler) exists to kill that waste. As your program runs, the JVM keeps profiling counters on how often each method and 	loop executes. When a chunk crosses a "hot" threshold, the JIT compiles that specific method's bytecode into native machine code, stashes it in 	the code cache, and every future call runs the compiled native version directly — no more per-instruction decoding. 
+	The JIT does not cache bytecode. It caches the native machine code it compiled that bytecode into. so that it will be used fir subsequent calls
+	JRE is the JVM plus the standard class libraries — the bundle that has everything needed to run a compiled Java app, and nothing needed to build 	one.
+	These are thousands of pre-compiled .class files that ship with Java — java.lang, java.util, java.io, and the rest — the classes your code uses 	but doesn't define.
+
+
+The classloader is the JVM's fetch-and-deliver clerk for classes. Its job is to take a class name, go find that class's .class bytes, and load them into memory so the class becomes usable 
+
+When your program runs and mentions a class — PrintStream, ArrayList, or your own Helper — that class isn't magically in memory. It's sitting as a .class file somewhere: inside the JRE libraries, inside your app's jar, somewhere on the classpath. Something has to notice "we need this class now," locate the file, and pull it in. That something is the classloader. You ask for a class by name; it produces the loaded class.
+
+Once a class is loaded, the classloader caches it. The next time that class is needed, there's no re-reading the file; it hands back the exact same loaded class. That's why a class's static initializer runs only once no matter how many times you use the class.
+
+There are three built-in loaders, top to bottom:
+
+1. Bootstrap ClassLoader — the root
+This is the oldest and strangest of the three. It loads the absolute core of the JDK — the java.base module: java.lang.*, java.util.*, so String, Object, Integer, List, and friends. 
+	It's written in native code (C++), not Java. It's part of the JVM itself, not a Java object.
+	Because it isn't a Java object, it's represented as null. When you call String.class.getClassLoader(), you get back null — that's not a bug or a 	missing value, it is the bootstrap loader. It's the root of the chain and has no parent.
+
+2. Platform ClassLoader — the JDK's other modules
+Not every JDK class lives in java.base. Modules like java.sql, java.xml, java.logging, and java.naming are loaded by the Platform ClassLoader. Its parent is the bootstrap loader.
+
+3. Application / System ClassLoader — your code
+This is the one you'll deal with 99% of the time. It loads everything on your application classpath: your own classes and your dependency JARs. Its parent is the platform loader. When your LoadingDemo called LoadingDemo.class.getClassLoader(), this is what came back — the AppClassLoader.
+
+	Bootstrap ClassLoader          (native C++  →  shown as null)
+                 │   loads: java.base — String, Object, java.util.* …
+                 ▼   (parent of ↓)
+        Platform ClassLoader           (…ClassLoaders$PlatformClassLoader)
+                 │   loads: java.sql, java.xml, java.logging … (JDK modules)
+                 ▼   (parent of ↓)
+     Application / System ClassLoader  (…ClassLoaders$AppClassLoader)
+                 │   loads: YOUR classpath — your classes + dependency JARs
+                 ▼   (parent of ↓)
+     Custom / plugin loaders YOU create (e.g. URLClassLoader for android-plugin.jar)
+                     loads: plugin JARs pulled in at runtime
+
+Before java 8 and below there was extension class loader instead of Platform class loader : It loaded JARs dropped into jre/lib/ext. Core classes came from a giant rt.jar. The app loader was sun.misc.Launcher$AppClassLoader.
+From Java 9 extension mechanism was removed entirely, and the Extension loader was replaced by the Platform ClassLoader. The app loader moved to jdk.internal.loader.ClassLoaders$AppClassLoader.
+
+In Java 8, the system loader was a URLClassLoader, so code like ((URLClassLoader) ClassLoader.getSystemClassLoader()).getURLs() worked.Now the URLClassLoader is the child of application class loader
+
+ClassLoader.getSystemClassLoader() — returns the application loader (the "system" loader and "application" loader are the same thing).
+
+
+Part 4 — The delegation model (parent-first)
+Before a loader tries to load a class itself, it asks its parent to load it first — and the parent asks its parent, all the way up to bootstrap. A loader only loads the class on its own if every ancestor above it failed.
+
+So the search travels up, and the actual loading happens as high in the chain as possible. This is called parent-first delegation.
+
+The exact algorithm — read the real thing
+ClassLoader.loadClass
+
+protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+    synchronized (getClassLoadingLock(name)) {
+        // 1. Have I already loaded this class? Never load twice.
+        Class<?> c = findLoadedClass(name);
+
+        if (c == null) {
+            try {
+                // 2. Ask my parent first (which recurses up to bootstrap).
+                if (parent != null)
+                    c = parent.loadClass(name, false);
+                else
+                    c = findBootstrapClassOrNull(name);   // parent == null means: try bootstrap
+            } catch (ClassNotFoundException e) {
+                // Parent couldn't find it. That's expected — swallow and continue.
+            }
+
+            if (c == null) {
+                // 3. Nobody above me had it. NOW I load it myself.
+                c = findClass(name);        // <-- the hook subclasses override
+            }
+        }
+
+        if (resolve) resolveClass(c);
+        return c;
+    }
+}
+
+
+Step 1 is why a class is never loaded twice by the same loader — findLoadedClass short-circuits. This is also why identity is stable.
+Step 2 is the delegation: parent before self, recursively. The request climbs to bootstrap first.
+Step 3 calls findClass, not loadClass. This is the crucial design seam — I'll come back to it.
+The whole thing is synchronized on a per-name lock — that's the thread-safety guarantee behind class loading.
+
+SEARCH GOES UP (delegate):          WHO ACTUALLY LOADS (checked highest-first):
+
+  Plugin loader                      Bootstrap : can I find com.sq.Foo?  no
+      │ delegate                     Platform  : can I find it?          no
+      ▼                              App       : can I find it?          no
+  App loader                         Plugin    : findClass() →           YES ✓
+      │ delegate
+      ▼                              → the HIGHEST loader that can find the
+  Platform loader                      class wins. Here only the plugin loader
+      │ delegate                       has android-plugin.jar, so it loads Foo.
+      ▼
+  Bootstrap  ──► tries first, can't find com.sq.Foo, fails back down
+
+Why parent-first exists 
+1. Security — you cannot replace core classes. Suppose an attacker (or a careless build) tries to slip a malicious java.lang.String onto the application classpath.Parent-first means the app loader delegates up, bootstrap loads the real String first, and the imposter is never even consulted. Core JDK types can't be shadowed by lower loaders.
+2. Consistency — one String for the whole JVM. Because core classes are always loaded by the highest loader that can, every corner of the program shares the same java.lang.String Class object. If different loaders could each load their own String, you'd have multiple incompatible String types and the type system would collapse. Parent-first guarantees a single, shared copy of every shared class.
+
+The design seam: loadClass vs findClass
+-> loadClass implements the delegation algorithm (the code above). You almost never override it — if you do, you're rewriting the delegation rule itself.
+-> findClass is the empty hook where you supply bytes. Override this to say "here's how I fetch and define a class" (from a JAR, a URL, a database, decrypted bytes...). URLClassLoader overrides findClass to fetch from URLs — that's the whole of what it adds.
+
+loadClass is the whole polite procedure above — "ask my parents first, and only load it myself if they all fail." It's already written for you inside the JDK. You almost never touch it. If you do rewrite it, you're rewriting the escalation rule itself — i.e. deliberately breaking parent-first.
+findClass is just the small piece that says "okay, here's how I personally go fetch the bytes" — from a JAR, a URL, a database, wherever. This is the blank you're meant to fill in when you write your own loader. Override findClass and you've politely added yourself to the chain without disturbing the delegation rule at all. (That's literally all URLClassLoader does — it fills in findClass to fetch from URLs.)
+
+When you compile Java, javac produces .class files — bytecode — and those files just sit on disk. Meanwhile the JVM is a live process running in memory. On disk you have inert bytes; in memory you need a real, usable type — something you can call new on, invoke methods on, read fields from. Class loading is the bridge between those two worlds: it takes the bytes from disk and turns them into a live Class object in memory. That's the mechanical answer. Without it, your bytecode is just a file; nothing can run.
+
+The loader knows where the class lives — a .class entry in a JAR, a file on disk, a URL, a database row, an encrypted blob — and it goes and reads those bytes into a byte[]. This part is genuinely the loader's job, and it's the part that varies from loader to loader. This is what makes loading pluggable
+But the loader does not "give bytes to the JVM" and step aside. It calls defineClass(name, bytes, ...) — and that is the step that actually turns the byte array into a live Class object. And here's the subtlety: defineClass isn't a separate JVM service the loader is talking to across a wall. It's a final method the loader inherited from the ClassLoader superclass. So the loader is calling a method on itself — it's just that the implementation of that method drops into JVM-internal machinery it can't see or change
+
+Visibility of Class Loader is One Directional
+
+A direct consequence of parent-first: a child loader can see classes its parents loaded, but a parent cannot see classes loaded by its children.
+
+This creates a famous problem
+The SPI problem and the Thread Context ClassLoader
+
+Here's the collision. DriverManager (JDBC's core machinery) is a JDK class, loaded high up. But the Postgres driver is on your application classpath, loaded by a child. Parent-first visibility says the high-up DriverManager cannot see the driver below it. So how does core JDK code load an implementation that lives beneath it?
+
+The escape hatch — the name I flagged in Part 3 — is the Thread Context ClassLoader (TCCL):
+ClassLoader cl = Thread.currentThread().getContextClassLoader();  // usually the app loader
+
+Every thread carries a pointer to a classloader, and it's normally set to the application loader. High-level JDK/framework code that needs to load a lower implementation grabs the TCCL and loads through that instead of through its own parent chain — deliberately reaching down. ServiceLoader (your Day 58 topic) uses the TCCL by default for exactly this reason. So the TCCL is the sanctioned way to violate parent-first when the standard flow can't reach an implementation. File it away; it becomes concrete when we build ServiceLoader-based discovery.
+
+When you deliberately break parent-first — child-first loaders
+Parent-first is the default, not a law. Servlet containers (Tomcat), OSGi, and most serious plugin systems flip it to child-first (a.k.a. parent-last) for application/plugin classes: the loader tries findClass on itself before delegating to the parent.
+Why break the rule? Isolation. Say the server ships Jackson 2.12 but your webapp needs Jackson 2.15. With parent-first, the server's 2.12 (loaded higher) always wins and your webapp is stuck. With child-first, the webapp loader loads its own Jackson 2.15 first, and the two coexist. Tomcat's WebappClassLoader is child-first for webapp classes — but note, still parent-first for java.* core classes, because breaking that would reopen the security hole. So real systems break delegation selectively.
+
+And here's where it connects straight to your battle scars: child-first (or duplicate JARs) is exactly how you end up with the same class loaded twice by two different loaders — and two loadings of one class name produce two distinct types that throw ClassCastException / LinkageError when mixed. Your NoSuchFieldError: lambdaTest and the Docker stale-shaded-Constants mess were delegation/isolation failures at heart: the wrong copy won the load, or two copies coexisted. Delegation is the machinery that decides which copy you get.
+
+The shared contract must be loaded by a common ancestor of both the host and the plugin. Only plugin-specific implementation classes should live in the child loader.
+
+
+DriverManager is JDK machinery — it lives high up, loaded by a senior. But your actual Postgres driver is a JAR on your application classpath — it lives down low, loaded by a junior. Now the problem is obvious: DriverManager (senior) needs to load and use the Postgres driver (junior)... but seniors can't see juniors. The very code whose job is to load database drivers is structurally forbidden from seeing the driver sitting beneath it. It's stuck.
+
+The solution: the Thread Context ClassLoader (TCCL). This is a deliberate escape hatch. Every thread quietly carries a pointer to a classloader — and that pointer is normally set to the application loader (a junior, the one that can see your driver). So when high-up JDK code needs to reach something below it, instead of using its own senior parent-chain (which can't see down), it grabs the thread's classloader and loads through that one instead
+
+ServiceLoader — the standard Java plugin-discovery mechanism — uses exactly this trick by default. So the TCCL is the sanctioned, official way to break the "no reaching down" rule when the normal flow can't get to an implementation.
+
+Part 5 — Class identity: name alone does not identify a class
+
+what does it mean for two classes to be "the same"? Your instinct from three years of Java says "same fully-qualified name = same class." That instinct is wrong, and correcting it is the whole payoff 
+
+A class's runtime identity is (fully-qualified name + the ClassLoader that defined it) — not the name alone.
+
+The JVM calls this pair the class's runtime identity, and the defining loader is called its defining classloader. Two Class objects are the same type only if both the name and the defining loader match
+com.sq.StepExecutor loaded by loader A and com.sq.StepExecutor loaded by loader B are not the same type. The name is identical. The bytes may be identical. The JVM still treats them as two unrelated types.
+If name alone identified a class, two plugins could never use different versions of the same library
+
+Why the JVM does this — it's a feature
+This looks bizarre until you see what it enables: isolation. If name alone identified a class, two plugins could never use different versions of the same library — the first com.fasterxml.jackson.Foo loaded would be the only one allowed to exist, forever, JVM-wide. By keying identity on (name + loader), the JVM lets loader A hold Jackson 2.12 and loader B hold Jackson 2.15 simultaneously, each a distinct type, fully walled off. Every plugin system, every servlet container, every OSGi bundle depends on exactly this. The "quirk" is the isolation mechanism.
+
+The three errors this produces
+-> When you accidentally load one class through two loaders, you get errors whose messages seem to contradict reality
+	ClassCastException : class com.sq.StepExecutor cannot be cast to class com.sq.StepExecutor
+Same name on both sides — looks impossible. It isn't: they're two different loaders' copies, two different types. The JVM's message often appends the loader names in parentheses to prove it. This is the signature of a class-identity problem.
+-> LinkageError : "loader constraint violation": when a method signature involves a type that two loaders disagree on, the JVM refuses to link them and says so explicitly, naming both loaders. 
+	Method parameter is a class object which might have been loaded by 2 loaders and while invoking ambiguty occurs and it might produce erroreneous 	results so we need to resolve that also
+-> ClassCastException : Another scenario : NoSuchFieldError this scenario that I faced in docker image for lambda test integration
+
+Two defining terms that you should know
+Defining loader — the loader that actually called defineClass and turned bytes into the Class. This is the one that counts for identity.
+Initiating loader — any loader you asked, which may have delegated the real work upward. The one you called loadClass on.
+
+Example from your own chain: when your plugin loader (parent-first) is asked for String, it initiates the request but delegates up — bootstrap defines it. So the plugin loader is an initiating loader for String; bootstrap is the defining loader. Identity is stamped by the defining loader, always. This is why "which loader loaded it" in earlier parts specifically meant the defining loader.
+
+the contract must be loaded by a common ancestor — and now you can state exactly why in identity terms:
+If host and plugin both delegate up to the same defining loader for the contract interface, they share one StepExecutor type, and (StepExecutor) instance succeeds. If the plugin defines its own copy, there are two StepExecutor types, and the cast throws — regardless of identical names or bytes.
+
+Here's a demo that defines the same class file through two separate loaders and proves they're different types. 
+
+  package com.plugin.loader;
+
+import java.net.URL;
+import java.net.URLClassLoader;
+
+public class IdentityDemo {
+    public static void main(String[] args) throws Exception {
+        // Point both loaders at the SAME classpath the app already uses.
+        URL[] cp = { IdentityDemo.class.getProtectionDomain()
+                        .getCodeSource().getLocation() };
+
+        // Two independent loaders, each with parent = null so they DEFINE
+        // Plugin themselves instead of delegating up to the app loader.
+        URLClassLoader loaderA = new URLClassLoader(cp, null);
+        URLClassLoader loaderB = new URLClassLoader(cp, null);
+
+        Class<?> a = loaderA.loadClass("com.plugin.loader.Plugin");
+        Class<?> b = loaderB.loadClass("com.plugin.loader.Plugin");
+
+        System.out.println("Same name?     " + a.getName().equals(b.getName())); // true
+        System.out.println("Same Class?    " + (a == b));                        // false
+        System.out.println("A's loader: " + a.getClassLoader());
+        System.out.println("B's loader: " + b.getClassLoader());
+
+        // The punchline: make an instance with loader A, try to cast to B's type.
+        Object objA = a.getDeclaredConstructor().newInstance();
+        System.out.println("Is objA a B-Plugin? " + b.isInstance(objA));         // false
+    }
+}   
+
+
+URLClassLoader loaderA = new URLClassLoader(cp, null);
+Here it will delegate till the Bootstrap and do not find anything so it will register as a new instance same goes in next method as well and both the class will be different
+
+If we write 
+URLClassLoader loaderA = new URLClassLoader(cp, IdentityDemo.class.getClassLoader());
+like this for both the class loaders 
+Setup: both loaders now have parent = app loader, and Plugin is sitting on the app classpath (it's your own compiled class, so the app loader can find it).
+That is because the IdentityDemo has been already loaded and a class which is prenent in that classpath, Being on the classpath only makes a class findable When IdentityDemo starts, Plugin is not loaded — it's just available to be found. The classpath is a search location, not a preload list.
+
+The app loader can find Plugin on its classpath. So when loaderA/loaderB delegate up (parent-first), the app loader defines Plugin once and then caches it (findLoadedClass). Both delegating loaders receive that one cached copy → same defining loader → same type → a == b is true
+
+URLClassLoader needs class path where should it actually search for classes that is the class path 
+cp = where to look (a folder or JAR) → given once, at construction.
+"com.plugin.loader.Plugin" = what to load → given later, in loadClass.
+
+Part 6 — The ClassLoader API surface
+Three methods, three jobs 
+The entire custom-classloader story comes down to three methods with a strict division of labor. You met them in passing; here they are pinned down:
+
+loadClass(name)     ── the DELEGATION algorithm (Part 4's code).
+   │                   Orchestrates: check cache → ask parent → else findClass.
+   │                   You INHERIT this. You almost never override it.
+   │
+   └─ findClass(name) ── the "GO GET THE BYTES" hook. Empty by default.
+         │                YOU override this: locate the .class, read raw bytes.
+         │
+         └─ defineClass(name, bytes, off, len) ── the JVM PRIMITIVE.
+                                Turns bytes → a real Class object.
+                                Stamps identity (name + THIS loader).
+                                You CALL this from findClass; you can't override it (final).
+
+loadClass decides who should load the class. It doesn't load it.
+loadClass doesn't fetch anything itself. It's a manager, not a worker. Its entire job is to orchestrate the procedure , it will just ceck whether that class is loaded or not till the parent then in the end comes back to app or Custom class loader
+findClass — the worker who fetches the bytes
+When loadClass reaches step 3 — "nobody above me has it, it's genuinely my job now" — it calls findClass. This is the worker. Its job is narrow and concrete: "go get the raw bytes of this class from wherever they live."
+defineClass — the JVM primitive that makes it real
+findClass handed it a raw byte array; defineClass turns those bytes into a living Class object the running program can use.
+defineClass is a final method provided by the ClassLoader superclass, so you cannot override it, and you don't want to. You inherit it and invoke it from inside your findClass, handing it the bytes you fetched.
+
+defineClass — the identity-stamping primitive
+It takes raw bytes and returns a live Class<?>. This is the "bytes → Class" step from Part 2's Loading phase, exposed to you.
+It's the call that stamps identity: the class's defining loader becomes this — the loader whose defineClass ran. This is literally where (name + defining loader) gets set. When you call it, you become the defining loader.
+It triggers linking — so verification happens here. A malformed class throws ClassFormatError/VerifyError from this call.
+It's final — you cannot override it, only call it. And it enforces load-once: call it twice for the same name on the same loader and you get LinkageError: attempted duplicate class definition
+
+You never call defineClass on JDK classes — those come from parents via delegation. You call it only for the classes your loader is responsible for: plugins, generated code, decrypted bytes, classes from unusual sources.
+
+Writing a real custom ClassLoader
+Here's a complete, runnable loader that reads .class files from a directory and defines them itself. This is essentially a stripped-down URLClassLoader — and once you understand these ~15 lines, URLClassLoader holds no mysteries. Drop it in your project
+
+
+package com.plugin.loader;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class DirClassLoader extends ClassLoader {
+
+    private final Path root;   // folder to search for .class files
+
+    public DirClassLoader(Path root, ClassLoader parent) {
+        super(parent);         // ← wires up delegation: sets the `parent` field from Part 4
+        this.root = root;
+    }
+
+    // Override ONLY findClass — the "fetch the bytes" hook.
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        try {
+            // com.plugin.loader.Plugin  ->  com/plugin/loader/Plugin.class
+            Path classFile = root.resolve(name.replace('.', '/') + ".class");
+            byte[] bytes = Files.readAllBytes(classFile);
+
+            // THE identity-stamping call: bytes -> Class, defined by THIS loader.
+            return defineClass(name, bytes, 0, bytes.length);
+        } catch (IOException e) {
+            // Couldn't find/read it -> signal "not here" so delegation can react.
+            throw new ClassNotFoundException(name, e);
+        }
+    }
+}
+
+
+what's not here: no loadClass override. You inherit the delegation algorithm untouched — you only supplied the two custom bits (where to look, root; how to read+define, findClass). That's the template-method pattern doing its job: the framework owns the policy (delegation), you fill in the mechanism (byte fetching).
+
+package com.plugin.loader;
+
+import java.nio.file.Path;
+
+public class ApiDemo {
+    public static void main(String[] args) throws Exception {
+        // The folder our compiled classes live in (target/classes) — the trick from before.
+        Path classesDir = Path.of(
+            ApiDemo.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+
+        // Parent = PLATFORM loader (NOT the app loader). Why: so the app classpath
+        // is NOT searched, so Plugin can't be found by a parent, so OUR findClass runs.
+        // JDK classes (String etc.) still resolve via platform -> bootstrap.
+        ClassLoader parent = ClassLoader.getPlatformClassLoader();
+
+        DirClassLoader mine = new DirClassLoader(classesDir, parent);
+
+        Class<?> c = mine.loadClass("com.plugin.loader.Plugin");
+
+        System.out.println("Loaded: " + c.getName());
+        System.out.println("Defined by: " + c.getClassLoader());   // <-- the payoff
+    }
+}
+
+
+O/P 
+Loaded: com.plugin.loader.Plugin
+Defined by: com.plugin.loader.DirClassLoader@<hash>
+
+That second line is the whole point of Part 6: Plugin was defined by your own loader, not the app loader. You wrote the code that stamped its identity.
+
+Part 7 — The lab: a real plugin host, isolation, and the classic failure
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

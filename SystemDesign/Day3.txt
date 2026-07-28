@@ -1,0 +1,412 @@
+							Speed and Decoupling
+Part 1: Caching Fundamentals
+A cache is a small, fast storage layer that holds a copy of frequently-accessed data, so you can serve it quickly instead of recomputing or re-fetching it from a slow source.
+
+The whole reason caching works comes back to the latency numbers
+Reading from RAM: ~100 nanoseconds
+Reading from SSD/database: ~100 microseconds to milliseconds
+That's roughly 1,000× slower for the database.
+
+So if you keep a copy of hot data in fast memory (RAM), you avoid the slow trip to the database. A cache trades a little memory and some staleness risk for a massive speed gain. That's the deal.
+The Mental Model You Already Have
+A HashMap that stores results of an expensive computation so you don't recompute — that's a cache.
+Memoization in DSA (you train interns on this!) — storing subproblem results so you don't recompute them — that's caching. Fibonacci with a memo table vs recomputing every branch: same idea, the memo is a cache.
+Redis sitting in front of your database — same principle, just a dedicated networked cache shared across all your servers.
+
+Cache Hit vs Cache Miss (essential vocabulary)
+Every cache lookup is one of two outcomes:
+Cache hit — the data you want is in the cache. Serve it directly from fast memory. Fast, cheap.
+Cache miss — the data is not in the cache. You must go to the slow source (database), fetch it, and (usually) store it in the cache so next time it's a hit.
+
+The single most important metric for a cache is its hit ratio = hits ÷ total lookups. A 90% hit ratio means 90% of requests are served from fast memory and only 10% hit the database. Higher hit ratio = faster system + less database load. Much of cache design is about maximizing the hit ratio — caching the right data (the hot, frequently-accessed stuff) and keeping it there long enough.
+
+Quick intuition on impact: if a DB read is 10ms and a cache read is 0.1ms, then at a 90% hit ratio your average read latency drops from 10ms to about 1.1ms — roughly 9× faster — and your database handles only one-tenth the traffic. That second effect is huge: caching doesn't just speed up reads, it dramatically reduces load on your database, which is usually your most precious, hardest-to-scale resource.
+
+Where Caches Live: the Layers (caching is everywhere)
+Interviewers like to hear that caching happens at many levels, not just Redis. From client to database:
+
+Browser cache — the user's browser stores static assets (images, CSS, JS) locally. Second visit → no network call at all. (You met this with DNS caching too.)
+CDN — geographically distributed caches for static content, near the user (that's Part 3).
+Load balancer / reverse proxy cache — Nginx can cache responses so they never reach your app servers.
+Application / in-memory cache — a cache inside your app server's memory (e.g. a local HashMap, or Caffeine in Java). Fastest (no network hop), but limited to one server and not shared.
+Distributed cache (Redis/Memcached) — a dedicated cache server (or cluster) shared by all your app servers. One network hop away, but shared and much larger. This is what people usually mean by "add a cache."
+Database cache — the DB itself caches query results and frequently-read pages in memory (the "buffer pool").
+
+
+Local (Caffeine, a HashMap in your JVM): fastest (nanoseconds, no network), but each server has its own copy → they can disagree, and it doesn't scale beyond one machine's RAM. Also ties back to yesterday — a local cache is state, making your server less stateless.
+Distributed (Redis): a network hop away (~0.5ms), but shared across all servers → consistent, and scales independently. This is why Redis dominates: it keeps your app servers stateless (the cache is external) while giving every server the same cached view. (This is exactly the "push state out of the servers" principle from Day 71, Part 6.)
+
+Many high-performance systems use both: a small local cache for the very hottest data (avoid even the network hop), backed by Redis for the shared layer. Naming that two-tier approach signals real-world experience.
+
+Interview soundbite: "A cache is a fast in-memory layer holding hot data to avoid slow database trips — RAM is ~1000× faster than disk. The key metric is hit ratio; a high ratio both speeds up reads and offloads the database. Caching happens at many layers — browser, CDN, reverse proxy, app-local, and a distributed cache like Redis. I'd typically use Redis as a shared cache to keep app servers stateless, sometimes with a small local cache in front for the hottest keys."
+
+Part 2: Caching Strategies & Eviction
+Caching sounds simple until you ask two hard questions: how do you keep the cache in sync with the database? (strategies) and what do you throw out when the cache fills up? (eviction). This part answers both, plus the two famously hard problems. This is where interviewers separate people who've said "add Redis" from people who've actually run a cache.
+
+When data changes, you must update both stores. Three strategies, each a different trade-off:
+
+1. Write-through — write to the cache and the database together, synchronously, on every write. Both are always in sync.
+
+Pro: cache never stale; reads always current.
+Con: every write pays two writes (cache + DB) → slower writes. And you cache data that might never be read.
+
+2. Write-back (write-behind) — write to the cache immediately, return success, and write to the database asynchronously later (batched).
+
+Pro: very fast writes (you only wait for the fast cache), and you can batch DB writes → high throughput. Great for write-heavy workloads.
+Con: risk of data loss — if the cache crashes before flushing to the DB, those writes are gone. Weaker durability. Use only where some loss is tolerable (e.g. view counts, metrics).
+
+3. Write-around — write only to the database, skip the cache; the cache gets populated later on a read miss (via cache-aside).
+
+Pro: avoids flooding the cache with write-heavy data that won't be read soon.
+Con: recently-written data is a cache miss if read right after (read-after-write is slow).
+
+The trade-off summary to say out loud:
+
+Write-through = consistency, slower writes.
+Write-back = fast writes, risk of loss.
+Write-around = good when you write a lot but read rarely.
+
+I'd use cache-aside for reads — check cache, on miss load from DB and populate. For writes, the choice is write-through for consistency at the cost of write latency, write-back for fast writes where some loss is acceptable, or write-around for write-heavy-read-rarely data. In practice I usually pair cache-aside reads with invalidating the key on write plus a TTL as a safety net."
+
+A cache is small by design (RAM is expensive). It fills up. When it's full and you need to add something new, you must evict something. The eviction policy decides what to drop — and a good policy keeps the hot data and drops the cold, maximizing hit ratio.
+
+The three you must know:
+
+1. LRU — Least Recently Used (the default, know this best). Evict the item that hasn't been accessed for the longest time. The bet: if you haven't used it recently, you probably won't need it soon. Matches real access patterns well (recently-used data tends to be reused). This is Redis's most popular policy and the one to name by default.
+
+Implementation note you can mention (ties to your DSA teaching!): LRU is a classic interview problem — implemented with a HashMap + doubly-linked list for O(1) get and evict. You've probably taught this exact problem. That's a lovely bridge: "LRU is both a cache eviction policy and the LeetCode problem I train interns on."
+
+2. LFU — Least Frequently Used. Evict the item accessed the fewest times (tracks a count, not recency). The bet: rarely-accessed items are least valuable. Better than LRU when some items are perennially popular. But it can keep stale-but-once-popular items too long, and needs to track counts.
+
+3. TTL — Time To Live (expiry, not strictly eviction but always used). Each item gets an expiry time; after it, the item is automatically removed regardless of use. You met TTL with DNS! Crucial because it's your safety net for staleness — even if you forget to invalidate on a write, a TTL guarantees the cache self-corrects within N seconds. Almost every cached item gets a TTL.
+
+Others to name-drop: FIFO (evict oldest inserted — simple but ignores usage), and random (surprisingly OK sometimes). But LRU is your go-to answer, with TTL layered on for safety.
+
+Part C: The Two Famously Hard Problems
+
+There's a famous saying: "There are only two hard things in computer science: cache invalidation and naming things." Here's the first one, plus its evil cousin.
+
+1. Cache Invalidation — the consistency problem
+
+Data changed in the DB, but the cache still holds the old value → users read stale data. Keeping cache and DB in sync is genuinely hard. Approaches:
+
+TTL (time-based) — accept staleness for up to N seconds; the item expires and refreshes. Simple, most common. Trade-off: shorter TTL = fresher but more misses; longer TTL = fewer misses but staler. (Same dial as DNS TTL!)
+Write-invalidate (event-based) — on every write, actively delete the affected cache key so the next read repopulates fresh. More precise, but you must reliably catch every write path.
+Often both: invalidate on write and set a TTL as a backstop.
+
+The honest interview point: "Perfect cache consistency is hard and expensive; usually I accept bounded staleness via TTL, and invalidate keys on writes for data that must be fresher. The right TTL depends on how stale the data can safely be."
+
+2. Cache Stampede (a.k.a. thundering herd) — the availability problem
+
+The dangerous one at scale. A popular cached key expires, and at that instant thousands of concurrent requests all miss simultaneously → they all hit the database at once to recompute the same value → the database gets crushed by a spike → possibly crashes. The cache that was protecting your DB becomes the trigger for overloading it.
+
+Fixes worth naming:
+
+Locking / request coalescing — only let one request recompute the value; the others wait for it and then read the fresh cache. (One thread fills, the rest queue — very like a single-flight pattern.)
+Stale-while-revalidate — serve the slightly-stale value while one background request refreshes it. Nobody waits, DB sees one refresh.
+Jittered/staggered TTLs — add randomness to expiry times so many keys don't all expire at the exact same moment (prevents synchronized mass-misses).
+Pre-warming — proactively refresh hot keys before they expire.
+
+Mentioning cache stampede unprompted is a strong senior signal — most candidates never think about what happens the moment a hot key expires.
+
+Interview soundbite: "Two hard parts: invalidation and stampede. For invalidation I use TTL for bounded staleness plus key-invalidation on writes where freshness matters. For stampede — when a hot key expires and thousands miss at once and hammer the DB — I'd coalesce requests so only one recomputes, use stale-while-revalidate, and jitter TTLs so keys don't expire simultaneously."
+
+Part 3: CDN (Content Delivery Network)
+A CDN is just caching applied to geography
+
+The Problem CDN Solves
+Remember the latency numbers from Day 71:
+Same-city/same-datacenter round trip: ~0.5–1 ms
+India ↔ US round trip: ~150–250 ms
+
+Now suppose your servers are in Virginia (US East), and a user in Bangalore loads your website. Every image, CSS file, JavaScript bundle, and video has to travel from Virginia to Bangalore — ~200ms each way, for every asset. A page with 50 assets feels sluggish, and your origin servers are doing all that work for users on the other side of the planet.
+
+Two problems at once:
+
+Distance = latency. Physics: data can't beat the speed of light through fiber. Far users get slow responses.
+Origin load. Every user worldwide hammers your origin servers for the same static files.
+
+The Solution: Cache Content Near the User
+
+A CDN is a globally distributed network of cache servers (called edge servers or PoPs — Points of Presence) that store copies of your static content close to users, so it's served from a nearby location instead of your distant origin.
+
+The CDN provider (Cloudflare, Akamai, AWS CloudFront, Fastly) has hundreds of edge servers in cities all over the world. Your static content gets cached at these edges. So:
+
+User in Bangalore → served from the Mumbai edge (~10ms) instead of Virginia (~200ms).
+User in London → served from the London edge.
+User in Tokyo → served from the Tokyo edge.
+
+Everyone gets the content from a server near them. That's the whole idea: move the data to the edge, close to the user — which is literally the Day 71 principle "half of system design is moving data closer to the user and into faster storage," made geographic.
+
+How It Works (the flow)
+User requests an asset (say logo.png). DNS (GeoDNS! — Day 71) routes them to the nearest edge server.
+Edge cache hit → the edge already has logo.png → serves it immediately from nearby. Fast. Origin never touched.
+Edge cache miss → the edge doesn't have it yet → it fetches once from your origin server, caches it locally (with a TTL), and serves it. Every subsequent user in that region gets a hit.
+
+So it's the same cache-hit/miss/populate model from Part 1 — just distributed across the globe, with each edge being a regional cache. The first user in a region "warms" the edge; everyone after benefits.
+
+What Goes in a CDN: Static vs Dynamic
+
+The key distinction interviewers want:
+
+Static content — perfect for CDN. Content that's the same for all users and doesn't change often:
+
+Images, videos, CSS, JavaScript files, fonts
+Downloads, documents
+This is what CDNs were built for.
+
+Dynamic content — traditionally NOT cached at the CDN. Content that's personalized or constantly changing:
+
+Your personalized feed, your account balance, live search results
+These differ per user/request, so a shared regional cache can't serve them from a static copy.
+These go to your origin servers (which is why you still need them + all the scaling from Days 71–72).
+
+(Modern nuance to name-drop: CDNs increasingly do more than static — "edge computing" runs code at the edge, e.g. Cloudflare Workers, and CDNs can cache some dynamic content briefly or do dynamic acceleration. But the clean mental model remains: static → CDN edge; dynamic/personalized → origin.)
+
+The Benefits (say all three)
+Lower latency — content served from nearby → dramatically faster for global users. Better UX, better conversion.
+Reduced origin load — the CDN absorbs the vast majority of requests for static assets (often 80–90%+ of total traffic is static). Your origin servers and database are freed up to handle only the dynamic work. This is a big scaling win — the CDN is a massive shield in front of your infrastructure.
+Bonus: resilience & DDoS protection — CDNs are huge and distributed, so they absorb traffic spikes and malicious attack traffic before it reaches your origin. Cloudflare is famous for DDoS mitigation. Worth mentioning.
+Where It Fits in the Big Picture
+
+Recall the photo-sharing estimation from Day 71 (100 TB/day of photos, 50:1 read-heavy). The design answer included "CDN + object storage." Now you see exactly why:
+
+Photos are static and read 50× more than written → cache them at CDN edges.
+Users worldwide get photos from their nearest edge (fast), and your origin/object-storage serves each photo only once per region (cheap).
+The CDN handles the enormous read traffic; your backend handles the small write traffic and metadata.
+
+That's the CDN earning its place through the numbers you calculated — exactly the "name the design decision every number forces" habit from Day 71.
+
+Interview soundbite: "A CDN is a globally distributed cache for static content — images, video, CSS, JS — served from edge servers near the user, cutting latency from hundreds of milliseconds to tens. It also shields the origin, absorbing the bulk of traffic since static assets dominate, plus gives DDoS protection. Static and shared content goes to the CDN; personalized dynamic content goes to origin. For something like a photo or video app, the CDN serves the read-heavy media while the backend handles writes and metadata."
+
+Part 4: Message Queues & Async Processing
+The Core Problem: Synchronous Coupling
+
+First, the problem queues solve. Normally, service A calls service B and waits for the response — synchronous. This is fine until it isn't:
+
+Imagine a user signs up. On signup you must: create the account, send a welcome email, generate a profile thumbnail, notify analytics, sync to the CRM. If you do all of this synchronously in the request:
+
+The user waits for all five to finish before getting a response — slow (email server takes 2s? user waits 2s).
+If the email server is down, the entire signup fails — even though emailing is non-essential. One slow/broken dependency breaks the whole flow.
+Signup is now tightly coupled to five other systems. They must all be up, and it's only as fast as the slowest one.
+
+The essential insight: most of that work doesn't need to happen before you respond to the user. The account must be created; the email, thumbnail, analytics, and CRM sync can happen afterward, in the background. The user shouldn't wait for them.
+
+The Solution: A Message Queue (Async Decoupling)
+
+A message queue is a buffer that sits between services. A producer puts a message on the queue and immediately moves on; a consumer picks it up and processes it later, independently. (Shown above.)
+
+Reworking the signup:
+
+Create the account (the essential part) → respond to the user immediately. Fast.
+Drop messages on a queue: "send welcome email," "generate thumbnail," "notify analytics," "sync CRM."
+Separate consumer services pull those messages and do the work in the background, at their own pace.
+
+The user got a fast response after step 1. Everything else happens asynchronously. This is async processing, and the queue is what makes it possible.
+
+The Three Big Benefits (name all three — this is the interview core)
+
+1. Decoupling. The producer doesn't know or care who consumes the message, or how many consumers there are, or whether they're even up right now. Signup just drops "send email" on the queue — it has zero knowledge of the email service. You can add, remove, or change consumers without touching the producer. Systems evolve independently. (This is the architectural version of "loose coupling" you know from good code design.)
+
+2. Resilience / fault tolerance. If the email consumer is down, messages wait safely in the queue until it comes back — then they get processed. The signup still succeeded; the email is just delayed, not lost. A downstream failure no longer cascades into a user-facing failure. The queue absorbs failures. (Contrast the synchronous version where email being down broke signup entirely.)
+
+3. Load leveling / buffering (handling spikes). This is huge and ties back to Day 71. Say a flash sale drives a sudden burst of 100,000 orders in a minute. If each order synchronously hammers your DB, it crashes. Instead, orders go on a queue, and consumers drain it at a steady, sustainable rate the database can handle. The queue acts as a shock absorber — it smooths a spiky, bursty load into a steady stream. Traffic spikes fill the queue temporarily instead of overwhelming your system. (Remember Day 71's "write-heavy → use a queue to buffer bursts"? This is exactly that.)
+
+There's a 4th, bonus benefit — scalability of processing: if the queue is backing up (consumers can't keep up), you just add more consumers to drain it faster. Because consumers are independent workers pulling from a shared queue, this is trivial horizontal scaling of the processing layer — and it connects to Day 71: the consumers are stateless workers, add as many as you need.
+
+A message queue decouples producer from consumer via an intermediate buffer. It gives three things: decoupling — the producer doesn't depend on the consumer; resilience — if a consumer is down, messages wait in the queue instead of failing the request; and load leveling — bursts fill the queue and consumers drain it at a steady rate the DB can handle, instead of a spike crashing the system. And I can scale processing by adding consumers. So non-essential work — emails, thumbnails, analytics — goes async via a queue, keeping the user-facing request fast.
+
+Sync vs Async — When to Use Which
+
+The design judgment interviewers want:
+
+Use synchronous when the caller needs the result to continue:
+
+Reading data to show the user (they need it now).
+A payment authorization you must confirm before showing "success."
+Anything where the next step depends on the answer.
+
+Use asynchronous (queue) when the work can happen in the background and the caller doesn't need to wait:
+
+Sending emails/notifications, generating reports/thumbnails, processing uploads (video encoding!), analytics/logging, syncing to other systems.
+Any task that's slow, non-essential to the immediate response, or spiky.
+
+The mental test: "Does the user need this to finish before I respond?" Yes → synchronous. No → queue it and respond now.
+
+Two Flavors: Queue vs Pub/Sub (know the distinction)
+
+There are two messaging models, and interviewers like this distinction:
+
+1. Message Queue (point-to-point / work queue). Each message is consumed by exactly one consumer. If you have 3 consumers, each message goes to one of them — this distributes work (load balancing across workers). Use for task distribution: "process this order" should be handled once, by whichever worker is free. (Classic tools: RabbitMQ, AWS SQS.)
+
+2. Publish/Subscribe (pub/sub / fan-out). Each message is delivered to every subscriber. One event → many independent consumers all receive it. Use when multiple systems need to react to the same event: an "order placed" event goes to the email service and the analytics service and the inventory service — each gets its own copy. (Tools: Kafka, Google Pub/Sub, Redis Pub/Sub.)
+
+Where Kafka fits — and your advantage: Kafka is primarily a pub/sub system (via topics), but with a twist that makes it do both — consumer groups. Within a consumer group, messages are divided among members (queue-like work distribution); across different groups, everyone gets all messages (pub/sub fan-out). That's exactly the mechanism we'll unpack in Part 5 (Kafka deep-dive) — and since you've operated Kafka, you'll recognize it immediately. The interview skill is just naming it: "Kafka gives me pub/sub across consumer groups and work-queue distribution within a group."
+
+One important caveat to mention (maturity signal): async isn't free. It adds complexity — you now run and monitor a queue (itself needing to be highly available), debugging is harder (flows span multiple async hops — remember correlation IDs from Day 71!), and you inherit delivery-guarantee and ordering problems (at-least-once vs exactly-once, message duplication). Those last ones lead straight into idempotency (Part 7). So: "I'd introduce a queue where decoupling and buffering are worth the added operational complexity — not for simple synchronous reads."
+
+Part 5: Kafka Deep Dive
+What Kafka Fundamentally Is
+Kafka is a distributed, append-only commit log.
+
+A traditional queue (RabbitMQ) is like a to-do list: a consumer takes a message off the list, and it's gone. Kafka is different — it's like a journal you keep appending to. Messages are written to the end of a log and stay there (for a retention period — days, weeks). Consumers don't remove messages; they just track how far they've read (their offset). This one design choice gives Kafka its superpowers: multiple independent consumers, replay, and huge throughput. Hold that thought — we'll see why each follows.
+
+The Core Concepts (the vocabulary to nail)
+
+1. Topic — a named category/feed of messages. Like a table name, or a channel: orders, user-signups, payments. Producers write to a topic; consumers read from it. Logical grouping of related messages.
+2. Partition — the key to Kafka's scale (this is the concept interviewers dig into). A topic is split into multiple partitions, and each partition is a separate ordered, append-only log. This is essentially sharding applied to the log (Day 72!) — splitting one topic across multiple logs/machines so it scales beyond one machine and can be consumed in parallel.
+
+Why partitions matter:
+
+Parallelism / throughput: with 3 partitions, 3 consumers can read simultaneously (one each) → 3× throughput. Without partitions, one topic = one consumer at a time = a bottleneck. Partitions are how Kafka scales horizontally. (Directly the sharding idea: split to scale.)
+Ordering guarantee — and its crucial limit: Kafka guarantees order only within a single partition, NOT across partitions. Messages in partition 0 are strictly ordered (offset 0, 1, 2...); but message X in P0 and message Y in P1 have no guaranteed relative order. This is the single most important Kafka gotcha in interview
+
+3. The partition key — how you preserve ordering where it matters. When producing, you can attach a key. Kafka hashes the key to pick a partition: same key → same partition → ordered together. (Hash-based sharding again — Day 72!) So if you key order events by user_id, all of one user's events land in the same partition and stay perfectly ordered relative to each other — while different users spread across partitions for parallelism. This is the trick to "how do you get ordering AND scale?": partition by the key whose order you care about. Saying this is a strong senior signal.
+
+4. Offset — each message in a partition has a sequential ID (0, 1, 2...). A consumer tracks which offset it has read up to — that's its bookmark. Because Kafka stores messages (doesn't delete on read), the consumer just advances its offset. This enables:
+
+Replay: a consumer can reset its offset backward and re-read old messages — reprocess after a bug fix, or a brand-new consumer can read the entire history from offset 0. Traditional queues can't do this (message is gone after consumption). Huge for analytics, recovery, and adding new consumers later.
+Independent consumers: each consumer/group has its own offset, so many can read the same partition at their own pace without affecting each other.
+
+5. Consumer Group — how Kafka is both queue AND pub/sub (the Part 4 cliffhanger, resolved). A consumer group is a set of consumers working together. The rules:
+
+Within a group: Kafka divides the partitions among the group's members — each partition goes to exactly one consumer in the group. So the group shares the work (work-queue / load-balancing behavior). Add more consumers to a group (up to the partition count) → drain faster. (This is your "scale processing by adding consumers" from Part 4.)
+Across groups: each group has its own offsets and independently reads all messages. So Group A (order-service) and Group B (analytics) both get every message (pub/sub / fan-out behavior).
+
+That's the answer to "how is Kafka both?": within a group = work-queue distribution; across groups = pub/sub broadcast. One topic feeds many independent teams, and each team internally load-balances. The diagram shows exactly this — Group A splits the 3 partitions across 2 consumers; Group B independently reads all 3.
+
+A subtle but important consequence (interview gold): the number of partitions caps the parallelism within a group. 3 partitions → at most 3 useful consumers in a group; a 4th sits idle (no partition to own). So you choose partition count based on your desired parallelism. This is a real design decision — "I'd pick partition count to match peak consumer parallelism, keyed by X to preserve per-X ordering."
+
+Durability & Reliability (round it out)
+Replication: each partition is replicated across multiple brokers (Kafka servers) — one leader, several followers (Day 72's replication, exactly!). Producers/consumers talk to the leader; if it dies, a follower is promoted. So a broker failure doesn't lose data. (Same primary-replica + failover reflex.)
+Persistence: messages are written to disk and retained for a configured period, so consumers can be down and catch up later, and history can be replayed.
+Broker: a Kafka server. A cluster is many brokers sharing partitions and replicas.
+
+"Kafka is a distributed append-only log, not a delete-on-read queue. A topic is split into partitions — each an ordered log — which is how it scales: partitions are consumed in parallel. Ordering holds only within a partition, so I key messages by the field whose order matters — like account_id — so that entity's events stay ordered while different entities parallelize. Consumers track offsets and messages are retained, enabling replay and independent consumers. Consumer groups make it both a work-queue — partitions split within a group — and pub/sub — different groups each read everything. Partitions are replicated across brokers for durability. Delivery is at-least-once, so consumers must be idempotent."
+
+Part 6: Rate Limiting
+Why Rate Limiting Exists
+
+Rate limiting = capping how many requests a client can make in a given time window (e.g. "100 requests per minute per user"). You need it for four reasons:
+
+Prevent abuse / DDoS — stop a malicious client from flooding you with millions of requests to knock you over. First line of defense against attacks.
+Ensure fair usage — stop one heavy user from hogging all capacity and degrading everyone else's experience. One tenant can't starve the rest.
+Protect backend resources — your DB, downstream services, and third-party APIs have limits. Rate limiting shields them from being overwhelmed (a cousin of the queue's load-leveling — but here you reject excess rather than buffer it).
+Control cost — if you pay per API call to a downstream provider (or per compute), limiting protects your bill. Also how you enforce paid tiers (free = 100/day, pro = 10,000/day).
+
+When a client exceeds the limit, you reject with HTTP 429 Too Many Requests (worth knowing the exact status code — interviewers like it), usually with a Retry-After header telling them when to try again.
+
+The Algorithms (know these — "design a rate limiter" wants them)
+
+There are four classic algorithms. Know token bucket best (the most popular), and be able to contrast the others.
+
+1. Token Bucket (the default answer — shown above). A bucket holds tokens, up to a capacity. Tokens refill at a fixed rate (e.g. 10/sec). Each request takes one token: token available → request passes; bucket empty → request rejected (429).
+
+The killer feature: it allows bursts. If the bucket has filled up to capacity (say 10) during a quiet period, a client can suddenly make 10 requests at once (spending all tokens), then is throttled to the refill rate. This matches real traffic, which is bursty — users click several things quickly, then pause. Token bucket accommodates that naturally while still enforcing a long-run average.
+Why it's popular: simple, memory-efficient (just store token count + last refill time per client), and burst-friendly. This is what AWS, Stripe, etc. mostly use.
+
+2. Leaky Bucket. Requests enter a queue (the bucket) and are processed at a fixed, constant rate (they "leak" out steadily); if the bucket is full, new requests are dropped.
+
+Key difference from token bucket: leaky bucket smooths output to a constant rate (no bursts — it forces steady flow), whereas token bucket allows bursts up to capacity.
+Think: leaky bucket = a funnel enforcing steady drip; token bucket = a savings account you can spend in a burst.
+Use leaky bucket when you need a strictly smooth downstream load (protecting something that can't handle spikes at all).
+
+3. Fixed Window Counter. Count requests per fixed time window (e.g. reset the counter every minute at :00). Simple: count[user][minute]++, reject over limit.
+
+The flaw interviewers love: the boundary burst problem. A user can send 100 requests at 10:00:59 and another 100 at 10:01:00 — 200 requests in 2 seconds, because they straddle two windows. The fixed reset creates a loophole at window edges.
+
+4. Sliding Window (Log or Counter). Fixes the boundary problem by tracking a rolling window (the last 60 seconds from now, continuously) rather than fixed buckets.
+
+Sliding window log: store a timestamp of every request, count how many fall in the trailing window. Accurate but memory-heavy (stores every timestamp).
+Sliding window counter: a smart approximation blending the current and previous fixed windows by weight — nearly as accurate, far cheaper. This is a common production choice.
+
+The trade-off summary: token bucket (burst-friendly, popular) · leaky bucket (smooths to constant rate) · fixed window (simplest, but boundary-burst flaw) · sliding window (accurate, more memory/compute).
+
+Where to Enforce It — the Distributed Challenge (the senior part)
+
+Where you rate-limit matters:
+
+At the API Gateway / Load Balancer (L7) — the most common place. Reject excess traffic at the edge, before it ever reaches your app servers. Efficient — bad traffic dies early. (Remember Day 71: L7 balancers/gateways do this; Spring Cloud Gateway has a rate limiter.)
+In the application — finer-grained, per-endpoint or per-business-rule limits.
+
+The hard problem — distributed rate limiting (interviewers probe this): you have the counter problem from Day 71 all over again. If you run 10 app servers each tracking limits in their own local memory, a user hitting different servers gets 10× the intended limit (each server thinks it's seen few requests). The limit must be global across all servers.
+
+The solution — and it ties everything together: a shared store, almost always Redis. All servers check and update the same counter in Redis (which has atomic increment operations, INCR, perfect for this). Now the limit is enforced globally regardless of which server handles the request. This is exactly the Day 71 principle — push shared state out of the servers into Redis to keep them stateless — applied to rate limiting. Redis's speed (sub-ms) makes the per-request limit check cheap.
+
+Naming this — "I'd enforce limits at the gateway, but the counters live in Redis so the limit is global across all app servers, not per-server" — shows you understand the distributed subtlety that trips up most candidates.
+
+Interview soundbite: "Rate limiting caps requests per client per window to prevent abuse, ensure fairness, protect the backend, and control cost — rejecting excess with 429. I'd default to the token bucket algorithm since it's simple and allows natural bursts up to a cap while enforcing an average rate. Fixed-window is simplest but has a boundary-burst flaw; sliding window fixes that at higher cost; leaky bucket smooths to a constant rate. I'd enforce at the API gateway, and critically, keep the counters in a shared Redis so the limit is global across all servers rather than per-server."
+
+Part 7: API Design & Idempotency
+Two topics: clean API design (foundational, expected) and idempotency (the concept foreshadowed since the Kafka at-least-once discussion — and a genuine senior differentiator).
+
+Part A: REST API Design Principles
+
+You build APIs in Spring daily, so this is mostly naming what you already do. Interviewers expect you to design clean APIs, so know the principles crisply.
+REST basics — resources and HTTP verbs. REST models your system as resources (nouns) acted on by HTTP methods (verbs):
+
+GET /users/123 — retrieve user 123
+POST /users — create a new user
+PUT /users/123 — update/replace user 123
+PATCH /users/123 — partially update user 123
+DELETE /users/123 — delete user 123
+
+Good API design principles to state:
+
+Nouns, not verbs, in URLs. POST /users — not /createUser. The HTTP method is the verb; the URL names the resource. GET /orders/5/items reads naturally.
+Use proper HTTP status codes. 200 OK, 201 Created, 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Too Many Requests, 500 Server Error. Meaningful codes let clients react correctly.
+Statelessness (Day 71!) — each request carries all needed info (e.g. auth token); the server keeps no client session. This is why REST scales horizontally.
+Versioning — /v1/users, /v2/users. Lets you evolve the API without breaking existing clients. Essential for anything with external consumers.
+Pagination — never return a million rows. GET /users?page=2&limit=50 (or cursor-based for large/changing datasets). Protects both server and client.
+Filtering/sorting via query params — GET /orders?status=shipped&sort=date.
+
+(One contrast worth a mention: REST vs gRPC. REST/JSON is human-readable, universal, great for public APIs. gRPC (binary, HTTP/2, protobuf) is faster and strongly-typed — often used for internal service-to-service calls where performance matters. "REST at the edge, gRPC internally" is a common pattern. Also GraphQL — lets clients request exactly the fields they need in one call, solving over-/under-fetching, popular for complex frontends. Naming these shows range.)
+
+Part B: Idempotency — the Senior Differentiator
+Definition: an operation is idempotent if performing it multiple times has the same effect as performing it once.
+
+The classic examples:
+
+GET /users/123 — idempotent. Read it once or 100 times, nothing changes, same result.
+PUT /users/123 {name: "Prajwal"} — idempotent. Setting the name to "Prajwal" repeatedly → still just "Prajwal." The end state is the same.
+DELETE /users/123 — idempotent. Delete it once, it's gone; delete again → still gone (same end state).
+POST /orders — NOT idempotent (the problem child). Each call creates a new order. Call it 3 times → 3 orders. Call "charge ₹1000" 3 times → ₹3000 charged.
+
+Why this matters — the real-world failure it prevents: Networks are unreliable (Day 71!). A client sends POST /charge ₹1000. The server processes it and charges the card — but the response gets lost on the way back (network blip). The client, seeing no response, retries — sends the same charge again. Now the customer is charged twice.
+
+This happens constantly in distributed systems: lost responses, timeouts, client retries, and — tying back to Kafka — at-least-once message delivery where a consumer reprocesses the same message after a crash. Any of these causes the same operation to execute more than once. For reads it's harmless; for writes/payments it's a disaster.
+
+The solution: Idempotency Keys (shown above). The client generates a unique key (e.g. a UUID) for each logical operation and sends it with the request (typically an Idempotency-Key header). The server:
+
+Receives the request with key abc-123.
+Checks if it has seen abc-123 before (stored in Redis/DB).
+Never seen it → process the operation once, store the key + the result, return the result.
+Seen it (this is a retry) → skip processing entirely, just return the stored result from the first time.
+
+How this resolves the Kafka thread: "at-least-once delivery + idempotent consumers = effectively exactly-once processing." Kafka might deliver a message twice, but if your consumer processes idempotently (checks "did I already handle message/order X?" before acting), duplicates are harmless. Idempotency is how you get correctness on top of at-least-once delivery — cheaper and more robust than trying to guarantee exactly-once delivery at the messaging layer. This is the standard pattern, and connecting it back to Kafka shows you see the whole picture.
+
+Design instinct to voice: "For any non-idempotent write — especially payments or order creation — I'd require an idempotency key so retries are safe, because in a distributed system retries are inevitable (lost responses, timeouts, at-least-once queues). The server dedupes on the key: process once, store the result, return the stored result on any retry."
+
+Interview soundbite: "An operation is idempotent if repeating it has the same effect as doing it once — GET, PUT, DELETE are naturally idempotent; POST isn't. That's dangerous because networks cause retries: a lost response makes a client resend a charge and double-bill. The fix is idempotency keys — the client sends a unique key per operation, the server processes it once, stores the result, and returns that stored result for any retry. It's how payment APIs work, and it's what makes at-least-once message delivery safe: idempotent consumers turn possible duplicates into exactly-once effects."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

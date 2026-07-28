@@ -1,0 +1,306 @@
+PART 1 — Foundations: what is a unit test, really?
+Unit test : It is a normal Java method that does three things
+Sets up some input.
+Calls one method you want to verify.
+Checks the result is what you expected.
+
+What's a "unit"? The smallest piece of behaviour worth testing. In Java that's almost always one method on one class.
+
+A real unit test runs that one method without its heavy real-world friends — no real database, no real network call, no real file.How we fake those friends is Mockito.
+Why isolate? Because a database is slow, the network can be down, and real calls have side effects (real money, real data). You want a test that runs the same way every time, in a flash, on any machine.
+
+Why do we bother? 
+->Catch bugs early.
+->Refactor without fear.
+->Living documentation. Like the code is covered with testing
+->Design feedback. If a class is painful to test, it's usually badly designed. Testing pressure makes you write cleaner code.
+
+The Test Pyramid — one picture interviewers love:
+
+	/\
+       /  \     	E2E / UI tests      (few — slow, brittle)
+      /----\
+     /      \  	        Integration tests   (some — medium)
+    /--------\
+   /          \ 	UNIT TESTS          (MANY — fast, cheap)   <- JUnit + Mockito live here
+  /------------\
+
+Unit tests are cheap and fast, so you write lots. The higher you go, the slower and more fragile, so you write fewer. JUnit + Mockito is the tooling for that big cheap base.
+
+Two patterns to memorize now — every test you ever write uses them.
+Structure of a test — AAA (also called Given-When-Then):
+
+// Arrange (Given) — set up inputs
+// Act     (When)  — call the ONE method under test
+// Assert  (Then)  — check the result
+
+When you don't know how to start a test, literally type those three comments and fill them in.
+
+Fast — milliseconds, no real DB/network.
+Isolated — doesn't depend on other tests or run order.
+Repeatable — same result every run, every machine (so: no LocalDateTime.now(), no randomness baked in).
+Self-validating — it decides pass/fail itself; you don't read logs.
+Timely — written close to the code.
+
+the "isolation" idea is the one that trips people up — the notion that we deliberately fake the database and network instead of using the real ones. Does that part sit right with you, or do you want me to unpack why faking is better than just using a test database?
+
+Part 2 : Junit Set Up
+What is JUnit 
+JUnit is the framework that finds your test methods, runs them, and reports pass/fail. You write the tests; JUnit is the machinery that executes them.
+JUnit 5 is not one library — it's three sub-projects. People who've only used it casually don't know this, and it's an easy way for an interviewer to separate "I've written a few tests" from "I understand the tool."
+
+JUnit 5  =  JUnit Platform  +  JUnit Jupiter  +  JUnit Vintage
+
+JUnit Platform — the foundation/launcher. It's what your IDE (IntelliJ) and build tool (Maven/Gradle) actually talk to in order to discover and run tests. It defines an API called TestEngine.
+
+JUnit Jupiter — the new programming model: the annotations and assertions you'll write (@Test, assertEquals, etc.). Jupiter is a TestEngine that plugs into the Platform.
+
+JUnit Vintage — a backward-compatibility engine that runs old JUnit 3 and 4 tests on the new Platform, so a team can migrate gradually instead of rewriting everything overnight.
+
+JUnit 5 is modular. The Platform is the launcher and the TestEngine API that IDEs and build tools use to discover and run tests
+Jupiter is the new test API plus the engine that runs JUnit 5 tests.
+Vintage is the engine that runs legacy JUnit 4/3 tests, so migration can be gradual.
+
+JUnit 4 vs 5
+
+package changed — JUnit 4 was org.junit, JUnit 5 is org.junit.jupiter.api
+annotation names changed — @Before → @BeforeEach, @BeforeClass → @BeforeAll
+the runner mechanism changed — JUnit 4 used @RunWith(...), JUnit 5 uses @ExtendWith(...)
+
+Junit 5 needs Java 8+
+
+<scope>test</scope> — test libraries must never ship inside your production jar. The test scope means "available when compiling/running tests, excluded from the final artifact." If someone asks "why scope test?", that's the answer: keep test code out of production.
+
+   @Test                                             
+   void add_returnsSumOfTwoNumbers() {
+        Calculator calculator = new Calculator();
+        int result = calculator.add(2, 3);
+        assertEquals(5, result);
+
+    }
+
+For each @Test method, by default JUnit creates a brand-new instance of the test class
+Your assertEquals either passes silently, or — if it fails — throws an AssertionError, which JUnit catches and records as a failed test.
+
+A JUnit test method passes if it returns normally and fails if it throws — assertions work by throwing AssertionError when the check is false. The Platform launcher discovers tests via the Jupiter TestEngine, and by default instantiates the test class once per test method for isolation.
+
+PART 3 — Assertions + testing exceptions
+
+A test passes by not throwing. An assertion is just a static method that checks a condition and throws AssertionError if it's false. So "asserting" = "throw if reality doesn't match my expectation." Everything below is variations on that one idea
+
+assertEquals on objects uses .equals(), not ==. This matters. If you assert two objects are equal but the class hasn't overridden equals(), Java falls back to reference identity (==) and your test fails even though the contents match. So when you write a value/DTO class you intend to compare in tests, you must override equals() and hashCode().
+
+== compares references (identity) , compares value and as well as reference
+.equals() compares content (equality) , compares only content
+
+Person p1 = new Person("Asha", 30);
+Person p2 = new Person("Asha", 30);
+assertEquals(p1, p2);   // PASSES only if Person overrides equals(); otherwise FAILS
+
+Your assertEquals on two objects with identical fields fails. Why?
+
+assertEquals compares with .equals(). If the class doesn't override equals()/hashCode(), it defaults to reference equality, so two distinct instances aren't equal. Fix: implement equals/hashCode (or use a record, or compare field-by-field)
+
+Identity vs equality — assertSame / assertNotSame
+This pair is the interview favourite in the assertions space because it forces you to articulate
+
+String a = new String("x");
+String b = new String("x");
+
+assertEquals(a, b);    // TRUE  — same VALUE (.equals)
+assertNotSame(a, b);   // TRUE  — different OBJECTS in memory (==)
+assertSame(a, a);      // TRUE  — literally the same reference
+
+assertEquals → "do they mean the same thing?" (.equals()) It will pass if the method is overridden 
+assertSame → "are they literally the same object?" (==, same memory reference)
+assertNotSame → "are they literally not the same object?" 
+
+When would you ever use assertSame?
+When identity matters, not just value — e.g. verifying a cache or object pool returns the same instance on repeated calls, or that a method returns this for fluent chaining.
+
+
+Floating-point — the delta (people fail this)
+assertEquals(0.3, 0.1 + 0.2);              // ❌ FAILS!
+assertEquals(0.3, 0.1 + 0.2, 0.0001);      // ✅ passes — third arg is the tolerance
+
+
+0.1 + 0.2 is not exactly 0.3 in binary floating point — it's 0.30000000000000004. That's not a JUnit quirk; it's how IEEE-754 doubles work in every language. So for double/float you must pass a delta (acceptable margin of error). The assertion passes if |expected - actual| <= delta.
+
+The Root cause : Computers think in binary, not decimal
+You and I write numbers in base-10 (decimal). A computer stores them in base-2 (binary).
+
+Most of the time that conversion is exact and invisible. But some numbers cannot be written exactly in binary, no matter how many digits you allow.
+1/3 = 0.33333333...   (the 3s never stop)
+
+You can't write 1/3 exactly in decimal — you'd need infinite digits. So if you wrote 0.3333 and multiplied by 3, you'd get 0.9999, not 1. The number got rounded because you ran out of space.
+
+Binary has the exact same problem — just with different numbers. It turns out 0.1 and 0.2, which look perfectly clean to us in decimal, are infinitely repeating fractions in binary (like 1/3 is in decimal). The computer can't store them exactly, so it stores the closest approximation it can fit in 64 bits (a double).
+
+What that does to 0.1 + 0.2
+
+0.1 is stored as something very slightly off from 0.1.
+0.2 is stored as something very slightly off from 0.2.
+Add those two tiny errors together, and the result lands at:
+
+System.out.println(0.1 + 0.2);
+// prints:  0.30000000000000004
+
+That trailing ...004 is the accumulated rounding error. It's tiny, but it's not zero. So:
+
+assertEquals (with no third argument) checks for exact equality. You're asking "is 0.30000000000000004 exactly equal to 0.3?" — and it isn't, so the test fails. The values mean the same thing to a human, but they're not bit-for-bit identical
+
+The delta = "how close is close enough?"
+The fix is to stop demanding exact equality and instead say "these two should be equal within a tiny margin of error." That margin is the delta — the third argument:
+
+The rule it applies internally is simply:
+pass if   |expected − actual|  ≤  delta
+
+So here: |0.3 − 0.30000000000000004| = 0.00000000000000004, which is way smaller than 0.0001. Within tolerance → pass.
+
+0.1 + 0.2 isn't exactly 0.3 because those decimals are repeating fractions in binary, so doubles store approximations and the rounding errors accumulate. For double/float I assert with a delta tolerance — pass if the absolute difference is within the delta. For values that must be exact, like money, I avoid floating point entirely and use BigDecimal
+
+Why does assertEquals(0.3, 0.1 + 0.2) fail and how do you fix it?
+Floating-point can't represent 0.3 exactly, so the sum is slightly off. I assert with a delta tolerance, or use BigDecimal for exact decimal arithmetic like money." (The "use BigDecimal for money" line scores bonus points.)
+
+Arrays and Collections
+
+assertArrayEquals(new int[]{1, 2, 3}, new int[]{1, 2, 3});   // element-by-element, in order
+assertIterableEquals(List.of(1, 2), List.of(1, 2));          // for List/Set/etc.
+
+Why a special assertArrayEquals? Because assertEquals on two arrays compares references (arrays don't override .equals() meaningfully), so it'd fail even for identical contents. assertArrayEquals walks the elements.
+
+Custom failure messages — and why the lambda form
+
+assertEquals(5, 2 + 3, "math is broken");              // eager: String always built
+assertEquals(5, 2 + 3, () -> "math is broken: " + heavyToString());  // lazy: built ONLY on failure
+
+If you want to add some custom failure messages in exception you should write the method like this 
+The second part is like writing a custom exception message in form of lambda expression which is the lambda (Supplier<String>) form 
+If your message is expensive to construct, the lambda avoids paying that cost on the thousands of times the test passes.
+
+If we write the exception messages in form of lambda supplier form then it will not be used whenever it passes , it only runs whenever it fails
+
+Why does JUnit 5 offer a Supplier<String> for assertion messages?
+Lazy evaluation — the message is only constructed when the assertion actually fails, so you don't waste CPU building strings for passing tests
+
+assertAll — see ALL failures, not just the first (important concept)
+
+Normally, the first failed assertion stops the test — it throws, and the lines after it never run. So if name and age are both wrong, you fix name, rerun, then discover age is wrong too. Annoying.
+
+assertAll runs every grouped assertion and reports all failures at once:
+
+@Test
+void person_hasAllCorrectFields() {
+    Person p = new Person("Asha", 30, "asha@mail.com");
+
+    assertAll("person fields",
+        () -> assertEquals("Asha", p.getName()),
+        () -> assertEquals(30, p.getAge()),
+        () -> assertEquals("asha@mail.com", p.getEmail())
+    );
+}
+
+Each assertion is a lambda; assertAll executes all of them, collects every failure, and throws a single combined error.
+
+Difference between writing three assertEquals calls versus one assertAll?
+
+Three sequential asserts stop at the first failure (fail-fast), so you only see one problem per run. assertAll runs all of them and reports every failure together — useful when I'm validating multiple properties of one object and want the full picture in one run.
+
+fail() — force a failure on purpose
+
+Handy as a TODO marker, or inside a branch you believe should never execute (fail("should never reach here")).
+
+
+Testing that code THROWS — assertThrows (the big one)
+Half of correctness is the error path. Interviewers always ask "how do you test that a method throws?" because beginners only test the happy path.
+
+@Test
+void divide_byZero_throwsArithmeticException() {
+    Calculator calc = new Calculator();
+    ArithmeticException ex = assertThrows(
+            ArithmeticException.class,        // 1. the exception type you EXPECT
+            () -> calc.divide(10, 0)          // 2. the code that should throw (an Executable lambda)
+    );
+    assertEquals("cannot divide by zero", ex.getMessage());   // 3. assert the MESSAGE too
+}
+
+
+How assertThrows thinks:
+It runs the lambda.
+If the lambda throws the expected type (or a subclass) → assertion passes, and it returns the caught exception.
+If the lambda throws a different type → fail.
+If the lambda throws nothing → fail ("expected an exception but none was thrown").
+
+The crucial detail beginners miss: assertThrows returns the exception object. That lets you go further and assert on the message, the cause, or any field — which is what step 3 does. A common mistake is checking only the type and not the message; senior reviewers want the message checked too, because two different bugs can throw the same exception type.
+
+
+assertThrows vs assertThrowsExactly
+
+
+// Suppose someClass throws an IllegalArgumentException (a subclass of RuntimeException)
+assertThrows(RuntimeException.class, () -> code());        // ✅ passes — subclass matches
+assertThrowsExactly(RuntimeException.class, () -> code()); // ❌ fails — it's the subclass, not exactly RuntimeException
+
+
+assertThrows accepts subclasses (polymorphic); assertThrowsExactly demands the exact class. Use exactly when the precise type matter
+
+assertDoesNotThrow — assert the happy path stays clean
+assertDoesNotThrow(() -> calc.divide(10, 2));   // fails if ANY exception escapes
+
+Why the lambda?
+Why () -> calc.divide(10, 0) and not just calc.divide(10, 0)? Because if you called it directly, the exception would be thrown right there in your test method, before assertThrows ever got a chance to catch it — your test would just error out. Wrapping it in a lambda defers execution: you hand assertThrows a recipe ("here's the code to run"), and assertThrows runs it inside its own try/catch. The lambda's type is JUnit's Executable functional interface (a void no-arg that may throw).
+
+How do you test that a method throws an exception in JUnit 5?
+assertThrows(ExpectedType.class, () -> methodCall()). It runs the lambda, passes if the expected type (or a subclass) is thrown, and returns the exception so I can also assert its message or cause. assertThrowsExactly requires the exact type; assertDoesNotThrow asserts the happy path doesn't throw
+
+JUnit 4 did this differently — how?
+JUnit 4 used @Test(expected = ArithmeticException.class) or the ExpectedException rule. The problem: expected couldn't pinpoint which line threw or check the message easily, and it passed even if the wrong line threw. JUnit 5's assertThrows scopes the assertion to a specific block and returns the exception for richer checks." (This contrast is a strong answer — it shows you know why the API changed.)
+
+Why pass a lambda instead of calling the method directly?
+To defer execution. A direct call would throw immediately inside the test and fail it; the lambda lets assertThrows invoke the code inside its own try/catch and capture the exception.
+
+
+FAIL () 
+Use case 1 — A placeholder for a test you haven't written yet
+Use case 2 — Marking a code that should be unreachable
+When your logic says "execution should never get here," fail() documents and enforces that:
+	@Test
+	void parseStatus_handlesAllKnownValues() {
+    		Status status = parser.parse("ACTIVE");
+
+    		switch (status) {
+        	   case ACTIVE   -> assertTrue(status.isLive());
+        	   case INACTIVE -> assertFalse(status.isLive());
+        	   default       -> fail("unexpected status: " + status);  // if we land here, the test SHOULD fail
+    		}
+	}	
+
+
+Use case 3 — The "should have thrown but didn't"
+This is why fail() existed so much in the JUnit 4 era. Before assertThrows, you tested exceptions like this:
+
+@Test
+void divide_byZero_throws() {
+    try {
+        calculator.divide(10, 0);
+        fail("expected ArithmeticException, but none was thrown");  // ← only runs if NO exception
+    } catch (ArithmeticException expected) {
+        assertEquals("cannot divide by zero", expected.getMessage());
+    }
+}
+
+fail() forces an unconditional failure. I use it as a placeholder so unwritten tests show red instead of falsely passing, and to guard unreachable branches. Historically it was used in the try/fail()/catch idiom for exception testing, but JUnit 5's assertThrows makes that obsolete
+
+
+
+
+
+
+
+
+
+
+
+
+
+

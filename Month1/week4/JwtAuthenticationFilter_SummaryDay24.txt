@@ -1,0 +1,351 @@
+================================================================
+  JWT AUTHENTICATION FILTER - doFilterInternal() METHOD SUMMARY
+================================================================
+  Day 24 - Library Management System
+  Purpose: Quick reading & revision notes
+================================================================
+
+
+================================================================
+                    COMPLETE CODE (FULL FILTER)
+================================================================
+
+package com.library.security;
+
+import com.library.util.JwtUtil;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+@Component
+@RequiredArgsConstructor
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtUtil jwtUtil;
+    private final UserDetailsService userDetailsService;
+
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain filterChain
+    ) throws ServletException, IOException {
+
+        // STEP 1: Get the Authorization header
+        String authHeader = request.getHeader("Authorization");
+
+        // STEP 2: If no header or doesn't start with "Bearer ", skip
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        // STEP 3: Extract the JWT token (everything after "Bearer ")
+        String jwt = authHeader.substring(7);
+
+        // STEP 4: Extract username from token
+        String username = jwtUtil.extractUsername(jwt);
+
+        // STEP 5: If we have a username AND no one is currently authenticated
+        if (username != null
+                && SecurityContextHolder.getContext().getAuthentication() == null) {
+
+            // STEP 6: Load the user from DB
+            UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+
+            // STEP 7: Validate the token
+            if (jwtUtil.validateToken(jwt, userDetails)) {
+
+                // STEP 8: Create an Authentication object
+                UsernamePasswordAuthenticationToken authToken =
+                        new UsernamePasswordAuthenticationToken(
+                                userDetails,
+                                null,
+                                userDetails.getAuthorities()
+                        );
+
+                // STEP 9: Attach request details (IP, session info)
+                authToken.setDetails(
+                        new WebAuthenticationDetailsSource().buildDetails(request)
+                );
+
+                // STEP 10: Set the user as authenticated in Spring's context
+                SecurityContextHolder.getContext().setAuthentication(authToken);
+            }
+        }
+
+        // STEP 11: Pass the request to the next filter/controller
+        filterChain.doFilter(request, response);
+    }
+}
+
+
+================================================================
+                     PURPOSE OF THE METHOD
+================================================================
+
+This method runs on EVERY incoming HTTP request.
+Its job: check if the request has a valid JWT token, and if yes,
+mark the user as "logged in" for the rest of the request.
+
+
+================================================================
+                    THE 11 STEPS (IN ORDER)
+================================================================
+
+
+STEP 1: Get the Authorization header from the request
+------------------------------------------------------
+Code: String authHeader = request.getHeader("Authorization");
+
+Reads the "Authorization" header that the client sends.
+Expected format: "Bearer eyJhbGc...token..."
+If no header sent, authHeader will be null.
+
+
+STEP 2: Skip if no token or wrong format
+----------------------------------------
+Code: if (authHeader == null || !authHeader.startsWith("Bearer "))
+         filterChain.doFilter(request, response);
+         return;
+
+Two cases handled here:
+  - No Authorization header at all
+  - Header exists but is not a Bearer token
+
+In both cases: just pass the request to the next filter and exit.
+We do NOT reject here. Why? Because some endpoints are public
+(like /api/auth/register). Spring's authorization layer decides
+later if the endpoint actually requires authentication.
+
+
+STEP 3: Extract the actual JWT (strip "Bearer ")
+------------------------------------------------
+Code: String jwt = authHeader.substring(7);
+
+"Bearer " is 7 characters (including the space).
+substring(7) gives us everything AFTER position 7.
+Result: just the pure token, no "Bearer " prefix.
+
+
+STEP 4: Extract username from the token
+---------------------------------------
+Code: String username = jwtUtil.extractUsername(jwt);
+
+Calls JwtUtil's helper. Internally this:
+  - Parses the JWT
+  - VERIFIES THE SIGNATURE using the secret key
+  - Returns the "sub" claim (which is the email)
+
+If we reach this point successfully, the token is mathematically
+genuine. Signature is already verified.
+
+
+STEP 5: Check we have a username AND no one is already logged in
+----------------------------------------------------------------
+Code: if (username != null &&
+         SecurityContextHolder.getContext().getAuthentication() == null)
+
+Two conditions, both must be true:
+  - username is not null (defensive check)
+  - SecurityContext is empty (no other filter has already
+    authenticated this user)
+
+If a previous filter (like OAuth) already authenticated the user,
+we respect that and don't override.
+
+
+STEP 6: Load the user from the database
+---------------------------------------
+Code: UserDetails userDetails =
+         userDetailsService.loadUserByUsername(username);
+
+Asks UserDetailsService to fetch the user from DB by email.
+
+Why hit DB every request? Because:
+  - User's roles might have changed since token was issued
+  - User might have been disabled or banned
+  - User might have been deleted entirely
+
+The JWT proves identity, but DB confirms current status.
+
+
+STEP 7: Validate the token (subject match + expiry check)
+---------------------------------------------------------
+Code: if (jwtUtil.validateToken(jwt, userDetails))
+
+Confirms:
+  - Token's username matches the user we loaded from DB
+  - Token has not expired
+
+If valid -> proceed to steps 8-10.
+If invalid -> skip auth, request continues without being logged in.
+
+
+STEP 8: Create the Authentication object
+----------------------------------------
+Code: UsernamePasswordAuthenticationToken authToken =
+         new UsernamePasswordAuthenticationToken(
+             userDetails,
+             null,
+             userDetails.getAuthorities()
+         );
+
+Spring's "authenticated user" object.
+
+3 arguments:
+  - userDetails       -> WHO is logged in (principal)
+  - null              -> Password is null (JWT itself is the proof)
+  - getAuthorities()  -> Roles/permissions (ROLE_USER, ROLE_ADMIN)
+
+Using this 3-argument constructor automatically marks the token
+as authenticated = true.
+
+
+STEP 9: Attach request details (IP, session info)
+-------------------------------------------------
+Code: authToken.setDetails(
+         new WebAuthenticationDetailsSource().buildDetails(request)
+      );
+
+Adds context: client IP, session ID.
+
+Useful for:
+  - Audit logs ("user X logged in from IP 192.168.1.10")
+  - Security monitoring (suspicious IP changes)
+  - Geo-restrictions
+
+Optional but recommended for production.
+
+
+STEP 10: Mark the user as authenticated in Spring's context
+-----------------------------------------------------------
+Code: SecurityContextHolder.getContext().setAuthentication(authToken);
+
+*** THIS IS THE LINE THAT "LOGS THE USER IN" ***
+
+After this line:
+  - Spring Security knows who the user is
+  - @PreAuthorize annotations work for this request
+  - Controllers can access the user via SecurityContextHolder
+
+
+STEP 11: Pass the request to the next filter or controller
+----------------------------------------------------------
+Code: filterChain.doFilter(request, response);
+
+CRITICAL! Without this line, the request HANGS forever.
+The controller never runs, no response goes back, client
+times out.
+
+Always call this at the end.
+
+
+================================================================
+                  COMPLETE FLOW IN ONE GLANCE
+================================================================
+
+  Request comes in
+        |
+        v
+  [1] Read Authorization header
+        |
+        v
+  [2] Has "Bearer "? --- NO ---> skip, pass to next filter
+        |
+       YES
+        |
+        v
+  [3] Extract JWT (substring(7))
+        |
+        v
+  [4] Get username from JWT (verifies signature)
+        |
+        v
+  [5] Username present AND no one authenticated yet?
+        |
+       YES
+        |
+        v
+  [6] Load user from DB
+        |
+        v
+  [7] validateToken() -> matches user, not expired?
+        |
+       YES
+        |
+        v
+  [8] Create UsernamePasswordAuthenticationToken
+        |
+        v
+  [9] Attach IP/session details
+        |
+        v
+  [10] Set in SecurityContextHolder ==> USER AUTHENTICATED
+        |
+        v
+  [11] Pass to next filter/controller
+        |
+        v
+  Controller runs - knows who user is
+
+
+================================================================
+                   KEY POINTS TO REMEMBER
+================================================================
+
+1. The filter runs on EVERY request - public or private.
+
+2. We do NOT reject requests without tokens here.
+   We just skip. Authorization layer decides later.
+
+3. Signature is verified in Step 4 (extractUsername).
+   Step 7 (validateToken) is a double-check for subject + expiry.
+
+4. We load from DB on every request because roles/status
+   might have changed since the token was issued.
+
+5. Step 10 (SecurityContextHolder.setAuthentication) is the
+   LINE that "logs the user in" for this request.
+
+6. ALWAYS call filterChain.doFilter() at the end.
+   Forgetting this is the #1 bug in Spring filters.
+
+7. The filter extends OncePerRequestFilter so it runs
+   exactly ONCE per HTTP request, even with internal forwards.
+
+
+================================================================
+                  INTERVIEW ANSWER (MEMORIZE)
+================================================================
+
+"My JwtAuthenticationFilter extends OncePerRequestFilter.
+The flow is: extract the Bearer token from the Authorization
+header - if missing, just pass through (some endpoints are
+public). Otherwise, I parse the token using JwtUtil to get
+the username, which also verifies the signature. Then I
+check if no user is already authenticated, load the full
+user from the database via UserDetailsService (because roles
+or status might have changed since token issuance), validate
+the token, and if everything checks out, I create a
+UsernamePasswordAuthenticationToken and set it in the
+SecurityContextHolder. From this point on, Spring knows
+who the user is for the rest of the request lifecycle.
+I always call filterChain.doFilter() at the end - forgetting
+that would hang the request."
+
+
+================================================================
+                          END OF SUMMARY
+================================================================

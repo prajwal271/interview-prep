@@ -1,0 +1,196 @@
+What IS Kafka?
+Apache Kafka is a distributed messaging system. Originally built at LinkedIn in 2011, now open-source and used by basically every modern engineering org at scale.
+What does Kafka actually do? Three things:
+Receives messages from producers (services that emit events)
+Stores them durably (writes them to disk, replicates across servers)
+Delivers them to consumers (services that want to react)
+
+Kafka itself is a server — remember our server discussion? It runs forever, listens on a port (9092 by default), and handles connections. You start it; it sits there waiting for producers to send messages and consumers to read them.
+
+You don't "install" Kafka into your app. Kafka is a SEPARATE program (like MySQL is separate). Your services CONNECT to Kafka over the network, send messages to it or read messages from it. Same client-server model you already know.
+
+The Five Core Kafka Concepts
+
+Concept 1: Broker
+A broker is one Kafka server instance — one running process. In dev, you have one broker. In production, Kafka runs as a cluster of multiple brokers (3, 5, 10+) for fault tolerance and scalability. The brokers coordinate through a separate service (Zookeeper historically, now KRaft mode is replacing it).
+For your learning today: ONE broker is fine. Just know that "broker" = "one Kafka server."
+
+Concept 2: Topic
+A topic is a named channel for messages. Like a folder name. You create a topic called book-borrowed, and all "a book was borrowed" events go into that topic.
+
+In your system, you'll create topics like:
+book-borrowed — events when a borrow is created
+book-returned — events when a book is returned
+user-registered — (future) events when a user signs up
+
+Concept 3: Producer
+A producer is code that SENDS messages to Kafka. It chooses a topic, packages the message (usually as JSON), and hands it to Kafka.
+In your system, borrow-service will be a producer — it'll send book-borrowed events to Kafka whenever a borrow happens.
+The producer doesn't know or care who will read the messages. It just dumps them in the topic and continues.
+
+Concept 4: Consumer
+A consumer is code that READS messages from Kafka. It subscribes to a topic. Kafka delivers messages as they arrive (or as the consumer requests them).
+In your system, notification-service will be a consumer — it'll listen to book-borrowed events and process them (today: log them; later: send actual emails).
+Multiple consumers can read the same topic. If you later add an analytics-service, it also subscribes to book-borrowed and reads the same events. The producer never had to change.
+
+Concept 5: Partition + Offset
+A topic is internally divided into partitions — multiple ordered logs. A topic with 3 partitions is really 3 separate ordered logs that together form the topic. Each message goes into exactly ONE partition (Kafka decides which, usually by hashing a key).
+Within a partition, messages are STRICTLY ORDERED. Each message gets a sequential number called an offset: 0, 1, 2, 3, 4...
+
+Topic: book-borrowed
+├── Partition 0: [msg-A, msg-D, msg-G, ...]   ← offsets 0, 1, 2...
+├── Partition 1: [msg-B, msg-E, msg-H, ...]   ← offsets 0, 1, 2...
+└── Partition 2: [msg-C, msg-F, msg-I, ...]   ← offsets 0, 1, 2...
+
+Why partitions? Two reasons:
+Parallelism. Multiple consumers can read DIFFERENT partitions of the same topic in parallel. With 3 partitions, you can have 3 consumer instances each reading from one partition — 3x throughput. With 1 partition, only one consumer can read at a time.
+
+Ordering guarantees. Within ONE partition, order is preserved. Across partitions, no global order. So if event order MATTERS for related events (e.g., all events for user 5), Kafka makes sure they go to the SAME partition — by using user_id as the partition key. Then user 5's events stay ordered.
+
+Offset. This is the consumer's bookmark. "I've read up to offset 47 in partition 0." Kafka remembers where each consumer is, so if the consumer restarts, it picks up from where it left off — doesn't re-read or skip messages.
+
+
+Here's the thing that makes Kafka special compared to other messaging systems: Kafka stores messages on disk and keeps them around even after they're consumed.
+This is unlike traditional queues (RabbitMQ in its default mode), where once a message is read, it's gone. In Kafka:
+A message is written to a partition
+The consumer reads it (incrementing its offset)
+But the message STAYS in the partition (typically for 7 days by default, configurable)
+
+
+Why does this matter?
+1. New consumers can replay history. Adding a new service tomorrow? It can read events from a week ago and catch up. This is genuinely powerful.
+2. Consumer failures are recoverable. If your consumer crashes mid-processing, it just restarts and resumes from its last saved offset. No messages lost.
+3. Multiple consumers can read independently. Email-service reads at offset 1000; analytics-service reads at offset 800. Each has its own offset. They don't affect each other.
+4. Decouples producers and consumers in time. A producer can send 1M events at midnight; consumers can process them throughout the next day. Kafka buffers everything.
+Compare to sync HTTP: if the consumer isn't ready when the producer calls, the producer fails. With Kafka, the message just waits.
+
+
+notification-service is overwhelmed at peak times. You run 3 INSTANCES of notification-service to parallelize the work. They all subscribe to book-borrowed. How does Kafka decide which instance gets which event?
+You configure all 3 notification-service instances with the same groupId = "notification-group". Kafka treats them as ONE LOGICAL CONSUMER and DIVIDES the partitions among them:
+Topic book-borrowed (3 partitions)
+├── Partition 0 → notification-service instance 1
+├── Partition 1 → notification-service instance 2
+└── Partition 2 → notification-service instance 3
+
+Each event is consumed by EXACTLY ONE instance within the group. Total processing is 3x faster.
+Now if analytics-service ALSO subscribes (but with a DIFFERENT groupId = "analytics-group"), it's treated as a SEPARATE logical consumer:
+
+Same Topic
+├── Partition 0 → notification-1  AND  analytics-1
+├── Partition 1 → notification-2  AND  analytics-2  
+└── Partition 2 → notification-3  AND  analytics-3
+
+Why async — synchronous calls become slow, tightly couple services, and have to be sequential. Async decouples and parallelizes.
+Kafka is a server — separate program, listens on port 9092, services connect to it.
+Five core concepts — Broker (one Kafka server), Topic (named channel), Producer (sends events), Consumer (reads events), Partition + Offset (ordered logs with positions).
+Durability — Kafka stores events on disk; multiple consumers can read independently; new consumers can replay history.
+Consumer groups — instances with the same groupId share partitions for parallelism; different groupIds get independent copies.
+Sync vs async trade-offs — use both, for different needs.
+
+Sync communication is for when you need an immediate answer to proceed. Async via Kafka is for when you want to notify the world about something that happened and let interested services react in their own time, without coupling your code to theirs.
+
+mKWLu6gkSFuurfK6R1URqQ
+
+cd C:\kafka\bin\windows
+
+Command to Start Kafka Server
+	kafka-server-start.bat ..\..\config\server.properties
+Command to create a Topic 
+	kafka-topics.bat --create --topic test-topic --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+Command to send Messages from Producer
+	kafka-console-producer.bat --topic test-topic --bootstrap-server localhost:9092
+Command to Receive Messages in Consumer
+	kafka-console-consumer.bat --topic test-topic --from-beginning --bootstrap-server localhost:9092
+
+
+In SpringBootApplication main classs we will not write this Annotation because
+@EnableKafka (Spring Boot auto-detects Kafka via the spring-kafka dependency and enables it automatically)
+
+ @KafkaListener(
+        topics = "book-returned",
+        groupId = "notification-service-group",
+        containerFactory = "returnedKafkaListenerContainerFactory"
+    )
+    public void onBookReturned(BookReturnedEvent event) {
+        log.info("Received book-returned event from Kafka: borrowId={}", event.getBorrowId());
+        try {
+            notificationService.processBookReturned(event);
+        } catch (Exception e) {
+            log.error("Failed to process book-returned event: {}", event.getBorrowId(), e);
+	    // In production we'd send to a dead-letter topic here
+        }
+    }
+
+@KafkaListener(...) — THE star annotation. Tells Spring Kafka: "automatically connect to Kafka, subscribe to this topic, and call this method whenever a message arrives." Spring handles ALL the boilerplate:
+Opens a connection to the Kafka broker
+Subscribes to the topic
+Starts a background thread to poll Kafka
+Deserializes incoming JSON into the method parameter (BookBorrowedEvent)
+Calls your method with the deserialized object
+Commits the consumer offset when your method returns successfully
+
+topics = "book-borrowed" — which topic to subscribe to. Must match what the producer writes to.
+groupId = "notification-service-group" — the consumer group. Remember from Part 1: consumer group determines which instances share work. All instances of notification-service share notification-service-group, so they split partitions. If you ran a different service (analytics) on the same topic with a DIFFERENT groupId, it would get its own copy.
+containerFactory = "borrowedKafkaListenerContainerFactory" — refers to a Spring bean we'll create in Step 6 (the Kafka config). This factory tells Spring HOW to deserialize the message (which event class to convert to). We need a different factory for each event type because each topic has different message shapes.
+
+Try/catch around notificationService.processBookBorrowed(event) — important. If the service throws, by default Kafka will REDELIVER the message (potentially infinitely if the bug is permanent). Catching prevents redelivery loops. In production, failed events go to a dead-letter topic for manual inspection. For learning, logging the error is fine.
+
+
+    public void publishBookBorrowed(BookBorrowedEvent event) {
+        try {
+            kafkaTemplate.send(BOOK_BORROWED_TOPIC,
+                    String.valueOf(event.getUserId()),  // key
+                    event);                              // value
+            log.info("Published book-borrowed event: borrowId={}", event.getBorrowId());
+        } catch (Exception e) {
+            log.error("Failed to publish book-borrowed event: {}", event.getBorrowId(), e);
+            // We do NOT rethrow — failed event publishing should not break the borrow flow
+        }
+    }
+
+
+kafkaTemplate.send(topic, key, value) — sends a message:
+topic — which topic to publish to
+key — used by Kafka to decide which partition. We use userId as the key. This means ALL events for the same user go to the SAME partition, preserving order. If user 5 borrows book A then book B, the events arrive in that order. (Across users, no global order.)
+value — the event object itself. JsonSerializer converts to JSON.
+
+The Saga Pattern — Closing the Day 33 Gap
+
+In createBorrow, here's the order today:
+1. fetchUser           (sync via Feign)
+2. check borrow limit  (local DB read)
+3. borrowBookCopy      (sync via Feign — book-service decrements)
+4. borrowRepository.save  (local DB write)
+5. publishBookBorrowed  (Kafka)
+
+If step 4 fails → @Transactional rolls back our local write → but book-service already decremented (can't undo). Inconsistency between book-service and borrow-service.
+If step 5 fails (Kafka down) → notification missed, but data is consistent. Less critical.
+
+The Saga Pattern (Choreography Style)
+Saga splits a long transaction into LOCAL steps coordinated via events. Each step has a compensating action that undoes it on failure.
+
+Saga orchestration could work two ways:
+1) Choreography (event-driven, no central coordinator):
+borrow-service: saves record in DRAFT state → publishes "BorrowRequested" event
+book-service: receives event → tries decrement → publishes "BookReserved" OR "BookUnavailable"
+borrow-service: receives BookReserved → marks borrow CONFIRMED → publishes "BorrowConfirmed"
+                OR receives BookUnavailable → marks borrow CANCELLED → publishes "BorrowCancelled"
+Each service reacts to events. No service knows the whole flow. Decentralized.
+
+2) Orchestration (central coordinator):
+A dedicated orchestrator service calls each step and handles failures. More centralized — easier to reason about, but introduces a coordinator service.
+
+Cross-service operations can't use @Transactional — each service has its own database. The standard pattern is Saga: break the transaction into local steps, each with a compensating action that undoes it on failure. Two styles exist: choreography, where services react to each other's events without a coordinator; and orchestration, where a central service drives the steps. For my LMS borrow flow, sync calls to user-service and book-service can leave inconsistent state if a later local step fails. The fix is to mark the borrow as DRAFT, publish a BorrowRequested event, have book-service handle the decrement asynchronously, and only confirm the borrow when it acknowledges. If book-service can't fulfill, it publishes a failure event, triggering compensating actions like marking the borrow CANCELLED. Kafka provides the durable messaging backbone — events survive service crashes and can be replayed
+
+
+
+
+
+
+
+
+
+
+
+
+

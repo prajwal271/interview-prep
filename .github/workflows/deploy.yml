@@ -1,0 +1,55 @@
+name: Deploy notes site to GitHub Pages
+
+# Rebuilds and publishes the static notes site on every push to main.
+# Add or edit a note (.txt / .md), commit, push — the site updates itself.
+# You can also trigger it by hand from the Actions tab (workflow_dispatch).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Permissions the deploy step needs.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy at a time. Don't cancel an in-progress deploy — let it
+# finish (GitHub's recommended setting for the Pages flow).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build static site (reads notes, writes revision-notes/*.html)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"   # keep __pycache__ out of the artifact
+        run: python revision-notes/build.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: revision-notes
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

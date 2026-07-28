@@ -1,0 +1,191 @@
+JPA + Hibernate + PostgreSQL
+
+Before ORM existed, to save one book to database you had to write this:
+
+Connection conn = DriverManager.getConnection("jdbc:postgresql://...", "user", "pass");
+PreparedStatement stmt = conn.prepareStatement(
+    "INSERT INTO books (title, author, available) VALUES (?, ?, ?)");
+stmt.setString(1, book.getTitle());
+stmt.setString(2, book.getAuthor());
+stmt.setBoolean(3, book.isAvailable());
+stmt.executeUpdate();
+stmt.close();
+conn.close();
+
+
+10+ lines just to save ONE object.
+Doing this for 50 entities. Easy to mess up parameter order. Memory leaks if you forget to close connection.
+
+With JPA + Hibernate:
+bookRepository.save(book);  // one line spring handles everything
+
+
+JPA vs Hibernate — The Analogy
+
+JPA       = RULES of a card game    (just a specification)
+Hibernate = PLAYERS following rules  (actual implementation)
+
+
+JPA = just interfaces and annotations. Cannot work alone.
+Hibernate = actually generates SQL and talks to database.
+Spring Boot auto-configures Hibernate as the JPA provider
+
+ORM = Object Relational Mapping
+
+Book class        ←→    books table
+book.title        ←→    title column
+bookRepo.findById ←→    SELECT WHERE id=?
+
+These two worlds are completely different. ORM is the bridge that maps one to the other automatically.
+
+ORM automatically converts your Java objects ↔ database rows without you writing SQL manually.
+
+
+// You write this Java
+Book book = new Book();
+book.setTitle("Clean Code");
+book.setAuthor("Robert Martin");
+
+bookRepository.save(book);  // ORM handles this
+
+-- ORM generates and runs this SQL automatically
+INSERT INTO books (title, author) VALUES ('Clean Code', 'Robert Martin');
+
+JPA is just a specification
+→ It is a set of interfaces and annotations
+→ It defines the RULES
+→ javax.persistence.* package
+→ Cannot run alone — needs someone to implement it
+
+Hibernate is an implementation
+→ It actually implements those interfaces
+→ It generates SQL
+→ It talks to the database
+→ It can run alone
+
+JPA       = USB Standard     (just defines the shape and rules)
+Hibernate = Samsung USB Cable (actually works, follows the standard)
+EclipseLink = Sony USB Cable  (also works, follows same standard)
+
+
+JPA Providers : Hibernate , EclipseLink , OpenJPA , DataNucleus
+
+Hibernate will be used widely because:
+
+✅ Most mature — 20+ years old
+✅ Best performance optimizations
+✅ Spring Boot auto-configures it by default
+✅ Largest community + documentation
+✅ Most interview questions assume Hibernate
+✅ Tested in large scale production systems
+
+If tomorrow you want to switch from Hibernate to EclipseLink — you change ONE line in application.yml. Your entire codebase stays the same.
+Because you code against JPA annotations — not Hibernate directly: 
+// You write this — pure JPA
+@Entity
+@Table(name = "books")
+
+
+@Entity — Tells Hibernate "This class is a database table"
+Just this one annotation — Hibernate now knows this class maps to a table.
+@Table — Specify the table name
+@Table(name = "books")
+Without @Table — Hibernate uses the class name as table name. With @Table — you control the exact name.
+
+@Id — Every table needs a Primary Key
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)  // auto increment
+
+@Column — Control each column's properties
+
+    @Column(nullable = false, length = 200)   // NOT NULL, VARCHAR(200)
+    private String title;
+
+    @Column(columnDefinition = "boolean default true")
+    private boolean available = true;
+
+    @CreationTimestamp
+    @Column(updatable = false)               // set once, never update
+    private LocalDateTime createdAt;
+
+   public Book() { }    // MUST have no-arg constructor for Hibernate
+
+
+Why No args constructor is required
+
+When you call bookRepository.findById(1) — Hibernate does this internally:
+Book book = new Book();        // 1. creates empty object using no-arg constructor
+book.setId(1L);                // 2. sets id from database row
+book.setTitle("Clean Code");   // 3. sets title from database row
+book.setAuthor("Robert Martin");// 4. sets author from database row
+
+Hibernate creates the object FIRST — then fills the values.
+It cannot fill values without first creating an empty object.
+
+What Happens Without No-Arg Constructor
+ERROR → No default constructor found
+App crashes on startup ❌
+
+Hibernate lifecycle:
+1. new Book()          ← needs no-arg constructor
+2. fill fields         ← needs setters or field access
+3. return to you       ← fully populated object
+
+This is the config that connects your Spring Boot app to a real PostgreSQL database.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/librarydb
+    username: postgres
+    password: yourpassword
+
+  jpa:
+    hibernate:
+      ddl-auto: validate        # PRODUCTION — checks schema matches entities
+    show-sql: true              # prints every SQL query to logs (dev only)
+    properties:
+      hibernate:
+        format_sql: true        # pretty prints the SQL
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+
+ddl-auto: create-drop
+→ Creates tables on startup
+→ DROPS everything on shutdown
+→ Use only for quick testing
+
+ddl-auto: update
+→ Adds new columns if missing
+→ NEVER drops columns
+→ Dangerous in production — can cause silent schema mismatch
+
+ddl-auto: validate
+→ Just checks if your @Entity matches the existing schema
+→ If mismatch → app crashes on startup (not during request)
+→ ALWAYS use this in production
+
+ddl-auto: none
+→ Does nothing — you manage schema yourself
+→ Used with Flyway 
+
+
+Why should you never use ddl-auto=update in production?
+
+Because update only adds columns — it never removes them. If you rename a field in your @Entity, update creates a new column but leaves the old one. Over time your schema becomes a graveyard of unused columns. Also it runs DDL statements during app startup which can cause table locks in production. Always use validate in production and manage schema changes with Flyway migrations
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,17 @@
+# Generated site output — rebuilt by revision-notes/build.py (and by CI on push).
+# Only the generated *.html is ignored. Everything else under revision-notes/ is
+# committed SOURCE: assets/style.css and the build.py / serve.py tooling. Do NOT
+# broaden this to "revision-notes/" or you'll drop style.css from the site.
+revision-notes/**/*.html
+revision-notes/.nojekyll
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

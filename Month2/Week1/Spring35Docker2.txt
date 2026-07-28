@@ -1,0 +1,321 @@
+A single-stage Dockerfile uses just one FROM instruction — the entire process (installing dependencies, building, and running) happens inside a single base image, and that one image is your final result. Simple to write; the tradeoff is that the final image carries all the build tools and is larger than it needs to be.
+
+FROM maven:3.9-eclipse-temurin-21
+WORKDIR /app
+COPY pom.xml .
+COPY src ./src
+RUN mvn clean package -DskipTests
+EXPOSE 8080
+CMD ["java", "-jar", "target/library-management-system-0.0.1-SNAPSHOT.jar"]
+
+This single image has Maven and the JDK, builds the jar, and runs it. The downside: Maven and the full JDK ship to production even though you only need a JRE to run the app.
+Java (packages a pre-built jar) — if you build with Maven outside Docker first: You only need JRE to run the jar
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY target/library-management-system-0.0.1-SNAPSHOT.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+RUN -->  executes a command at build time (installing deps, compiling).
+EXPOSE — documents which port the app listens on.
+CMD / ENTRYPOINT — the command that runs when the container starts. (CMD is easily overridden; ENTRYPOINT is more fixed — they're often used together.)
+
+A multi-stage Dockerfile uses more than one FROM. Each FROM starts a new "stage." You do the heavy building in an early stage (with all the build tools), then start a fresh, clean stage for the final image and copy in only the finished artifact — leaving all the build tooling behind. The result is a much smaller, leaner production image, all from a single Dockerfile.
+
+
+# ---- Stage 1: build ----
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /app
+COPY pom.xml .
+COPY src ./src
+RUN mvn clean package -DskipTests
+
+# ---- Stage 2: runtime ----
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=build /app/target/library-management-system-0.0.1-SNAPSHOT.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+
+Stage 1 is discarded — none of its tools or source ship to production.
+Stage 2 will be there in the image
+
+When you run docker build, Docker executes both stages, but only the last stage becomes your image. Everything in build is thrown away once its artifact has been extracted.
+
+Why teams almost always prefer this for production:
+--> Much smaller images. A single-stage Spring Boot image (Maven + JDK + source + build cache) can run 700 MB–1 GB+. The multi-stage equivalent (JRE + jar) is often around 200–300 MB. Smaller images push, pull, and start faster.
+--> Same simplicity. Still one Dockerfile, still one docker build command. You get all the benefit without managing separate build scripts.
+--> Smaller attack surface / better security. Compilers, build tools, and your raw source code aren't in the production image, so there's far less for an attacker to exploit, and you're not shipping source.
+
+That's the entire trick. 4× smaller image, no compiler in production, smaller attack surface.
+
+# ============================================================
+# STAGE 1 — BUILDER
+# ============================================================
+FROM maven:3.9-eclipse-temurin-17 AS builder
+
+WORKDIR /build
+
+# Copy parent POM first (multi-module project needs it)
+COPY pom.xml /build/pom.xml
+
+# Copy this service's POM
+COPY user-service/pom.xml /build/user-service/pom.xml
+
+# Download dependencies (cached layer if POMs don't change)
+RUN mvn -f /build/user-service/pom.xml dependency:go-offline -B
+
+# Now copy the actual source code
+COPY user-service/src /build/user-service/src
+
+# Build the jar, skip tests (CI runs tests separately)
+RUN mvn -f /build/user-service/pom.xml clean package -DskipTests -B
+
+# ============================================================
+# STAGE 2 — RUNTIME
+# ============================================================
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+# Copy ONLY the built jar from the builder stage
+COPY --from=builder /build/user-service/target/*.jar /app/app.jar
+
+# Document which port this container listens on
+EXPOSE 8081
+
+# Run as a non-root user (security best practice)
+RUN addgroup -S spring && adduser -S spring -G spring
+USER spring:spring
+
+# How to start the app when the container runs
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+
+Multi-Stage Dockerfile
+
+Create .dockerignore at the project root (same folder as the parent pom.xml):
+**/target/
+**/.idea/
+**/.vscode/
+**/*.iml
+.git/
+.gitignore
+**/.DS_Store
+**/Dockerfile
+docker-compose*.yml
+README.md
+*.md
+
+Why: when you run docker build, Docker tars up the entire build context and sends it to the Docker daemon. Without .dockerignore, your target/ folders (containing built jars from your local IntelliJ runs), .idea/ folders, .git/ (could be hundreds of MB) all get shipped to the daemon. Wastes time, bloats build context, and can accidentally leak .git/ secrets into the image.
+
+docker build -f user-service\Dockerfile -t library/user-service:0.1 .
+docker build -f book-service\Dockerfile -t library/book-service:0.1 .
+docker build -f borrow-service\Dockerfile -t library/borrow-service:0.1 .
+docker build -f notification-service\Dockerfile -t library/notification-service:0.1 .
+
+docker images | findstr library
+
+Q: Walk me through how you containerized your Spring Boot service.
+"I wrote a multi-stage Dockerfile. The builder stage uses maven:3.9-eclipse-temurin-17 to compile the source into a jar — I copy POMs before source code so dependency downloads cache as a separate layer, which makes incremental builds fast. The runtime stage uses eclipse-temurin:17-jre-alpine and copies only the built jar from the builder. This cuts the image from over a gigabyte to around 250 MB and removes the compiler from production, shrinking the attack surface. I also run as a non-root spring user and use the exec-form ENTRYPOINT so SIGTERM reaches the JVM directly and Spring Boot shuts down gracefully on docker stop."
+
+Q: You have multiple microservices. How do you containerize them?
+"Each service gets its own multi-stage Dockerfile following the same pattern — Maven builder stage, then a slim JRE runtime stage. The Dockerfiles differ only in module path and exposed port; everything that changes between environments — database URLs, Kafka brokers, downstream service URLs — comes from environment variables at runtime, not from the image. This follows the 12-factor app principle: one image, multiple environments. For build performance, the dependency-download layer caches separately per service, and in production I'd use BuildKit cache mounts on ~/.m2 to share dependencies across services."
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Part 3: DOCKER-COMPOSE.YML ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Docker Compose is a YAML file that describes a multi-container application, plus a CLI (docker compose up/down/logs) that talks to the Docker daemon to apply that description.
+
+Compose is docker run for many containers, with a shared network and shared lifecycle, declared in one file. Everything you can do in Compose, you could do with a long shell script of docker run commands. Compose just makes it declarative, idempotent, and version-controllable.
+
+You created a network manually and ran two containers on it. Compose automatically creates a default bridge network for all services in the file. Every service gets a DNS name equal to its service name.
+So if you define a service called mysql in compose, every other service can reach it at hostname mysql on whatever port it exposes — no IP addresses, no localhost. This is how borrow-service will reach user-service: not via http://localhost:8081 (that's IntelliJ-only), but via http://user-service:8081.
+
+A container's filesystem is temporary. When you remove a container, everything written inside it dies. For your MySQL container, that means: every book, user, borrow record — gone.
+A named volume is a piece of host disk that Docker manages, mounted into a container at a specific path. When the container dies, the volume stays. When you create a new container and mount the same volume, your data comes back.
+
+That one line, mysql_data:/var/lib/mysql, reads as two halves separated by the colon:
+mysql_data (left) = the name of the locker — a storage box Docker keeps on your host disk, outside any container.
+/var/lib/mysql (right) = the folder inside the container where MySQL writes its data.
+
+volumes:
+  mysql-data:        # declare a named volume
+
+services:
+  mysql:
+    volumes:
+      - mysql-data:/var/lib/mysql   # mount it where MySQL writes data
+
+
+Healthchecks — the thing most tutorials get wrong
+	borrow-service:
+  		depends_on:
+    		- mysql
+    		- kafka
+
+depends_on without conditions only guarantees that the MySQL container has started — not that MySQL is ready to accept connections. MySQL takes 15-30 seconds to initialize. Your borrow-service Spring Boot app will try to connect, get refused, and crash.
+
+The correct pattern uses healthchecks + condition: service_healthy:
+
+mysql:
+  healthcheck:
+    test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+
+borrow-service:
+  depends_on:
+    mysql:
+      condition: service_healthy
+Now Compose actually waits until MySQL responds to mysqladmin ping before starting borrow-service.
+
+Your current setup uses Kafka 4.3 in KRaft mode natively on Windows. We'll do the same thing inside Compose using the official apache/kafka image, which handles KRaft setup automatically — no separate ZooKeeper container needed (that's the old way; you should know it existed but you don't need it).
+
+Two listeners are needed:
+One for inter-container traffic (other compose services reach Kafka at kafka:9092)
+One for host traffic (your IntelliJ or Postman scripts reach Kafka at localhost:29092
+
+Create this file at the project root:docker-compose.yml
+Add contents which are necessary
+Create volume folder mysql-data where the sql should actually be written locally
+We will have built all the 5 images previously only but we will now be running all the images through one command using docker compose up 
+
+
+Then run this command
+docker compose up : It will actually run all the images bundled up in the image 
+docker compose ps : It will show you the active docker compose
+docker compose down            # stop & remove containers; keep volumes
+docker compose down -v         # stop, remove containers, AND wipe mysql-data volume
+
+Q: Walk me through how you containerized your microservices system.
+"I have a single docker-compose.yml that brings up MySQL, Kafka in KRaft mode, and four Spring Boot services on a shared bridge network. Each Spring Boot service has its own multi-stage Dockerfile producing a ~250 MB image. Configuration is externalized — the same image runs in IntelliJ pointing at localhost, or in Compose pointing at container hostnames, controlled entirely through environment variables. That's the 12-factor principle.
+Two interesting bits: first, I use Compose healthchecks with depends_on: condition: service_healthy instead of bare depends_on, because the latter only waits for the container to start, not for MySQL or Kafka to be ready to accept connections. Second, Kafka has two listeners — an internal one advertised as kafka:9092 for inter-container traffic and an external one advertised as localhost:29092 for host-side tools like Postman scripts — because an advertised listener has to be reachable from wherever the client lives.
+Data persists across runs because MySQL uses a named Docker volume. Wiping it is a one-flag command, which is great for resetting test state. Bring-up time went from manually starting 5 things in order to a single docker compose up."
+
+In Production : The application containers run in Docker/Kubernetes. The database doesn't. The database is a separate managed service from a cloud provider
+AWS RDS (MySQL, PostgreSQL, MariaDB, Oracle, SQL Server)
+AWS Aurora (AWS's enhanced MySQL/PostgreSQL)
+Google Cloud SQL
+Azure Database for MySQL/PostgreSQL
+DigitalOcean Managed Databases
+
+Docker Compose is a tool that reads a YAML file describing multiple containers and tells the Docker daemon to start them all together with shared networking, volumes, and lifecycle.
+The YAML file (docker-compose.yml)
+The CLI (docker compose up, down, logs, ps, exec)
+The Docker daemon — the actual thing running containers; Compose just translates YAML into many docker run calls
+
+The specific advantages — what Compose gives you 
+1. One file describes the whole system Your docker-compose.yml is the single source of truth for "what does the library system look like." A new developer reads it and understands the architecture in 30 seconds. 
+
+2. One command for the whole lifecycle 
+docker compose up        # bring everything up
+docker compose down      # tear everything down cleanly
+docker compose restart   # restart everything
+docker compose logs      # logs from all services interleaved
+docker compose ps        # status of all containers
+
+3. Automatic networking 
+When you write:
+services:
+  mysql:
+  user-service:
+  book-service:
+
+Compose automatically:
+
+Creates a default bridge network
+Adds DNS so mysql resolves to the MySQL container's IP
+Connects every service to it
+
+With raw Docker, every container needs --network lms-net, you create the network manually first, and you remember to delete it later.
+
+4. Dependency ordering with healthchecks
+depends_on:
+  mysql:
+    condition: service_healthy
+
+Compose waits for MySQL's healthcheck to pass before starting dependent services.
+
+5. Environment configuration is structured
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller	
+write env onc eand configure it lot of times but in normal docker setup you need to write that a lot of times
+
+6. State and idempotency
+Run docker compose up when everything's already running → Compose notices nothing changed and does nothing. Change one service's environment block and re-run docker compose up → Compose recreates only that one container
+
+Q: Why use Docker Compose instead of just running containers with docker run?
+"Compose lets me declare a multi-container application in one YAML file — networks, volumes, dependencies, environment, healthchecks — and bring it all up or tear it all down with one command. Raw docker run works fine for a single container, but the moment I have multiple services that need to talk to each other, like my four Spring Boot services plus MySQL and Kafka, I need things like service-name DNS, ordered startup with healthchecks, named volumes per project, and a single source of truth for the topology. Compose gives all of that for free. The bigger win is that it's declarative: the YAML describes the desired state and Compose reconciles to it. That's the same mental model I'd use with Kubernetes in production, so Compose is a stepping stone, not just a convenience."
+
+docker compose up                 # Start everything, attach to logs (Ctrl+C stops)
+docker compose up -d              # Start everything in background (detached)
+docker compose down               # Stop and remove containers + network (volumes survive)
+docker compose down -v            # Same as above PLUS wipe named volumes (resets DB data)
+docker compose restart            # Restart all containers (same containers, fresh processes)
+docker compose restart borrow-service   # Restart just one
+docker compose ps                 # Status of all containers (running, healthy, exited)
+docker compose logs               # All logs, all services, interleaved
+docker compose logs -f            # Same, but follow (live tail) — Ctrl+C exits
+docker compose logs borrow-service               # Only one service's logs
+docker compose logs -f borrow-service            # Live tail one service
+docker compose logs --tail=50 borrow-service     # Last 50 lines only
+docker compose logs --since=5m                   # Last 5 minutes
+
+docker compose exec borrow-service sh : Getting inside a running container
+docker compose exec mysql mysql -uroot -proot : Getting inside shell of MySQL
+
+
+Q1: What's the difference between an image and a container?
+
+"An image is an immutable, layered filesystem snapshot — a blueprint. A container is a running instance of that image, with its own writable layer on top. One image can have many containers running off it. Containers are temporary; when you remove one, anything written to its writable layer is gone. Persistent data lives in volumes mounted into the container."
+
+Q2: What's the difference between a virtual machine and a container?
+"VMs virtualize the whole hardware stack — each VM runs its own OS kernel on top of a hypervisor. Containers virtualize at the OS level — they share the host's Linux kernel and isolate processes using namespaces and cgroups. That makes containers start in milliseconds vs a VM's minutes, and consume tens of MB vs gigabytes. The tradeoff is isolation: containers share a kernel so a kernel-level vulnerability is more dangerous than in a VM."
+
+Q3: What's a Docker layer? Why does layering matter?
+"Every instruction in a Dockerfile that touches the filesystem — FROM, COPY, RUN — creates a new layer. Layers are stacked union-filesystem style; the final image is the union of all layers. Layers are cached: if the inputs to a layer haven't changed since the last build, Docker reuses the cached layer. That's why I copy POMs and run dependency download before copying source code — the slow dependency step gets cached and only re-runs when POMs change."
+
+Q4: Why a multi-stage Dockerfile?
+"Two reasons. First, image size — the builder stage has Maven, the JDK, source code, and the .m2 cache, which is over a gigabyte. Only the final stage ends up in the published image, and that's just JRE + my jar, around 250 MB. Second, security — production images don't contain a compiler or build tools, so the attack surface is smaller."
+
+Q5: What's a bind mount vs a named volume?
+"Bind mounts map a specific host path into the container — good for source code or config files I want to edit from the host. Named volumes are Docker-managed storage in a daemon-controlled location — good for stateful data like a database, because they have better performance, cleaner permissions, and are portable across machines. In my Compose file I use a bind mount for the MySQL init SQL scripts and a named volume for MySQL data."
+
+Q6: Why is depends_on not enough? What do you use instead?
+"Bare depends_on only waits for the dependency container to start, not for the application inside to be ready. MySQL takes 15-25 seconds after the container starts before it accepts connections, so my Spring service would crash trying to connect. The fix is to define a healthcheck on MySQL and use depends_on: condition: service_healthy on the dependent service. That actually waits for the readiness probe to pass."
+
+Q7: How do containers find each other?
+"Compose creates a default bridge network per project. Every service gets a DNS name equal to its service name. So my borrow-service can reach the MySQL container at the hostname mysql and Kafka at kafka — no IP addresses, no localhost. localhost inside a container refers to the container itself, which is a classic gotcha when you containerize an app that previously used localhost URLs."
+
+Q8: How do you configure the same image for dev and prod?
+"Configuration comes from environment variables, not the image. The image is built once and is identical across environments. In Spring Boot, environment variables override application.yml values via Spring's relaxed binding, so SPRING_DATASOURCE_URL in Compose overrides spring.datasource.url in YAML. For Feign client URLs that aren't standard Spring properties, I use placeholder syntax like ${user-service.url:http://localhost:8081} — env var wins in Compose, default kicks in locally from IntelliJ. This is the 12-factor app principle: same code and same image, different config per environment."
+
+Q10: Walk me through what happens when you run docker compose up.
+"Compose parses the YAML, computes the desired state, and asks the Docker daemon to reconcile. The daemon creates the bridge network if missing, creates declared volumes if missing, pulls any images not present locally, then starts containers respecting depends_on ordering. For each container with a healthcheck, Compose waits for it to be healthy before starting anything that depends on it. Each container gets connected to the project network with its service name as DNS, gets the environment variables injected, has volumes mounted, and runs its ENTRYPOINT. Once all containers are up, Compose either streams logs (foreground) or returns (with -d)."
+
+Q11: How do containers communicate over the network — what's actually happening under the hood?
+"Each container gets a virtual network interface attached to the bridge network — basically a software switch managed by the Docker daemon. The daemon also runs an embedded DNS server on 127.0.0.11 inside every container, which resolves service names to the container IPs on that network. So when Spring's Feign client does an HTTP call to http://user-service:8081, the JVM asks the OS to resolve user-service, the OS asks 127.0.0.11, gets the IP, and opens a TCP connection over the bridge. To the application, it looks identical to calling any external HTTP service."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

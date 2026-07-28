@@ -1,0 +1,81 @@
+One-line intent: provide a stand-in (surrogate) for another object that controls access to it — the proxy implements the same interface as the real object, so callers can't tell the difference, but the proxy can add behavior before, after, or instead of forwarding the call to the real thing.
+
+The core idea: a proxy sits in front of a real object, wearing its face (same interface). Every call goes to the proxy first; the proxy decides what to do — check permissions, cache a result, lazy-load the real object, log the call, open a transaction — and then usually forwards to the real object. The caller thinks it's talking to the real thing.
+
+Proxy pattern: provide a stand-in object that controls access to another object. The proxy has the same interface as the real thing, so callers can't tell the difference — but the proxy sits in the middle and does something extra before (or instead of) passing the call through to the real object.
+
+The everyday analogy: a security guard at a gate. You want to enter the building (the real object). You don't walk straight in — you talk to the guard (the proxy), who looks identical in authority. The guard checks your ID, maybe logs your entry, then lets you through — or turns you away. From your side it feels like "entering the building," but access went through a controller.
+
+Say driving a Vehicle should be restricted — only someone with a valid licence can actually drive. We put a proxy in front of the real car that checks the licence before allowing the drive.
+
+Step 1 — the shared interface. This is what makes the proxy interchangeable with the real thing:
+public interface Vehicle {
+    void drive(String user);
+}
+
+Step 2 — the real object. It does the actual work and, crucially, doesn't worry about permissions — that's not its job:
+public class RealCar implements Vehicle {
+    public void drive(String user) {
+        System.out.println(user + " is driving the car");
+    }
+}
+
+Step 3 — the proxy. Same interface, holds a reference to the real object, and adds the access check before delegating:
+public class CarProxy implements Vehicle {
+    private RealCar realCar = new RealCar();
+    private List<String> licensedUsers = List.of("Deepa", "Ravi");
+
+    public void drive(String user) {
+        if (licensedUsers.contains(user)) {
+            realCar.drive(user);              // allowed -> pass the call through
+        } else {
+            System.out.println(user + " has no licence — access denied");
+        }
+    }
+}
+
+Step 4 — using it. The caller holds a Vehicle and has no idea it's talking to a proxy:
+Vehicle car = new CarProxy();     // looks like a Vehicle, actually a gatekeeper
+
+car.drive("Deepa");               // Deepa is driving the car
+car.drive("Stranger");            // Stranger has no licence — access denied
+
+Proxy — same interface, controls access to one object. "Should this call go through, and what happens around it?
+
+The problem is that controlling access to an object (when/whether/how you reach it) is a different concern from what the object does — and it doesn't belong inside the object, in a subclass, or in the client. It belongs in a separate stand-in that sits in front of the real object, wearing the same face, so it can intercept access and add the control logic transparently.
+
+Create a proxy that implements the same interface as the real object and holds a reference to it; the client talks to the proxy (thinking it's the real thing), and the proxy adds its control logic — lazy loading, access checks, caching, logging — before/instead of forwarding to the real object.
+
+Proxy solves the problem of controlling or adding behavior around access to an object, without modifying the object or the client. For example, a remote image that's expensive to load — you want to defer the load until it's actually displayed. Putting that lazy-loading inside the image class violates SRP by mixing 'being an image' with 'managing when to load,' and isn't even possible if the class is third-party or final. Subclassing fails because the parent may already load eagerly or be final, and it couples you to the concrete class. Handling it in the client scatters the logic everywhere. Proxy fixes this with a stand-in that implements the same interface as the real object and holds a reference to it: the client talks to the proxy thinking it's the real thing, and the proxy adds its control logic — lazy loading, access checks, caching — before forwarding. Because it shares the interface, it's an invisible drop-in substitute, so the client is untouched and the real object stays simple. That transparency is exactly why frameworks like Spring use proxies to add behavior to your beans.
+
+
+The classic Proxy has three roles: a Subject interface, a Real Subject that does the actual work, and a Proxy that implements the same interface, holds a reference to the real subject, and controls access to it. For example, an Image interface, a RemoteImage that downloads and renders, and an ImageProxy that also implements Image but holds just the URL and doesn't create the RemoteImage until display() is first called — lazy loading. The proxy's constructor is cheap, so you can build fifty proxies with no downloads, and only the ones actually displayed trigger the real load. Because the proxy shares the interface, the client holds an Image and can't tell it's a proxy — it's a transparent substitute, so the client and the real object are both untouched. The mechanical core of every proxy is: add control logic, then forward to the real object. This hand-written version is a static proxy — one class per interface — which is why frameworks use dynamic proxies to generate them at runtime instead
+
+Proxy is a structural pattern that provides a stand-in for another object to control access to it. The proxy implements the same interface as the real object, holds a reference to it, and adds behavior before or instead of forwarding the call — so the client talks to the proxy thinking it's the real thing and stays completely untouched. That transparency is why it's the mechanism behind most of Spring's 'magic': @Transactional, @Cacheable, @Async, and Spring Security are all proxies wrapping your beans, and Hibernate's lazy-loaded entities are virtual proxies.
+
+"How is it structured?" → (Part 2) Three roles: a Subject interface, a Real Subject that does the work, and a Proxy that implements the same interface, holds the real object, adds control logic, then forwards. The mechanical core of every proxy is "add logic, then forward to the real object."
+
+"How does Spring actually use proxies?" → (Part 6 — folded in, the important one) Spring AOP wraps your beans in proxies. When you annotate a method @Transactional, Spring injects a proxy instead of your bean; the proxy opens a transaction, calls your real method, then commits or rolls back — you never see it. @Cacheable is a caching proxy, @Async a proxy that runs the call on another thread, @PreAuthorize a protection proxy. The famous gotcha: because the proxy intercepts external calls, a @Transactional method called from within the same class (a self-invocation) bypasses the proxy — the annotation silently does nothing. That's a classic senior-level interview trap, and knowing it signals real Spring experience.
+
+In my own work, proxies are everywhere once you see them: Hibernate hands me virtual proxies for lazy collections in my JPA entities — which is why accessing one outside a transaction throws LazyInitializationException; my Feign clients in the microservices are remote proxies turning a method call into an HTTP request; and every @Transactional service method is running through a Spring AOP proxy. Understanding Proxy is really what explains how Spring adds all that behavior without me writing it
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,423 @@
+@Autowired : We use this dependency to tell spring that we need this dependency find the bean and give it to me 
+There are 3 ways to inject the dependent bean but we should use the better one 
+
+	Way 1 — Field Injection ( ❌ Don't use )
+
+@Service
+public class BookService {
+
+    @Autowired  
+    private BookRepository bookRepository;
+}
+
+Spring sets this field directly using Java Reflection. Spring uses Java Reflection to reach into your object and forcibly set the private field — even though it's private. 
+
+Test Class
+BookService service = new BookService(); // bookRepository is NULL
+service.getBooks(); 
+
+Why we should not use :
+1) We cannot use this if spring is not there means in junit testcases. If you try to create BookService in a unit test bookRepository is NULL , You're forced to spin up Spring just to test a simple method.
+2) And you donot know that the BookService is dependent on repository or not 
+3) Field can never be final : we cannot declare the repository as final , because final fields must be set in the constructor. Non-final means someone can accidentally change the reference
+
+	Way 2 — Setter Injection ⚠️ (Only for Optional Dependencies)
+
+@Service
+public class BookService {
+
+    private BookRepository bookRepository;
+
+    @Autowired  // Spring calls this setter after creating BookService
+    public void setBookRepository(BookRepository bookRepository) {
+        this.bookRepository = bookRepository;
+    }
+}
+
+
+When to use: Only when the dependency is optional — meaning your class can still function without it.
+
+@Service
+public class BorrowService {
+
+    private NotificationService notificationService; // optional
+
+    @Autowired(required = false) // won't fail if no bean found
+    public void setNotificationService(NotificationService ns) {
+        this.notificationService = ns;
+    }
+
+    public void borrowBook(Long bookId) {
+        if (notificationService != null) {
+            notificationService.notify("Book borrowed");
+        }
+    }
+}
+
+
+	Way 3 — Constructor Injection ✅ (Always Use This)
+
+@Service
+public class BookService {
+
+    private final BookRepository bookRepository; // final = cannot be null, cannot be changed
+
+    // Spring sees ONE constructor → automatically injects
+    // No @Autowired annotation needed in Spring Boot (added in Spring 4.3)
+    public BookService(BookRepository bookRepository) {
+        this.bookRepository = bookRepository;
+    }
+}
+
+Why this is the best : 	1)  Benefit 1 — TESTABLE without Spring
+				BookRepository mockRepo = Mockito.mock(BookRepository.class);
+				BookService service = new BookService(mockRepo); // works perfectly
+				// No Spring context needed. Fast tests.
+			2)  Benefit 2 — Dependencies are VISIBLE
+			3)  Benefit 3 — Fields can be FINAL means cannot be reinitialized
+			4)  Benefit 4 — NULL SAFETY -- Spring will FAIL AT STARTUP if BookRepository bean doesn't exist
+
+There are three types of dependency injection in Spring — field, setter, and constructor. Constructor injection is always preferred because it makes dependencies explicit, allows fields to be final (ensuring null safety and immutability), and makes the class easily testable without a Spring context. Field injection uses reflection and hides dependencies. Setter injection is only appropriate for optional dependencies.
+
+		~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+@Qualifier and @Primary — When Spring Finds Multiple Beans
+So far every example had one bean per type. Spring finds BookRepository — there's only one — it injects it. Simple. But what happens when you have two beans of the same type?
+
+public interface NotificationService {
+    void send(String message);
+}
+
+@Service
+public class EmailNotificationService implements NotificationService {
+    public void send(String message) {
+        System.out.println("Sending EMAIL: " + message);
+    }
+}
+
+@Service
+public class SmsNotificationService implements NotificationService {
+    public void send(String message) {
+        System.out.println("Sending SMS: " + message);
+    }
+}
+
+@Service
+public class BorrowService {
+
+    private final NotificationService notificationService;
+
+    public BorrowService(NotificationService notificationService) {
+        this.notificationService = notificationService;
+    }
+}
+
+At application startup 
+Spring looks in its container Found EmailNotificationService ✅ Found SmsNotificationService ✅ 
+Which one to inject NoUniqueBeanDefinitionException No qualifying bean of type 'NotificationService' available: expected single matching bean but found 2: 
+emailNotificationService, smsNotificationService
+
+You have two fixes. @Primary and @Qualifier. They solve different problems.
+Fix 1: @Primary — Set a Default
+@Primary : use this annotation over the implementing class , so that it will make that bean as the default one to be injected at runtime
+
+@Service
+@Primary  // "Use me by default when no specific choice is made"
+public class EmailNotificationService implements NotificationService {
+    public void send(String message) {
+        System.out.println("Sending EMAIL: " + message);
+    }
+}
+
+When one implementation is the sensible default for 90% of cases. You set it once and forget it. Other places that need the special one will use @Qualifier.
+
+Fix 2: @Qualifier — Be Specific 
+@Qualifier lets you say exactly which bean you want by name.
+
+@Service("emailNotification")  // explicit bean name
+public class EmailNotificationService implements NotificationService {
+    public void send(String message) {
+        System.out.println("Sending EMAIL: " + message);
+    }
+}
+
+@Service("smsNotification")  // explicit bean name
+public class SmsNotificationService implements NotificationService {
+    public void send(String message) {
+        System.out.println("Sending SMS: " + message);
+    }
+}
+
+@Service
+public class BorrowService {
+
+    private final NotificationService notificationService;
+
+    // Tell Spring EXACTLY which bean to inject
+    public BorrowService(@Qualifier("emailNotification") NotificationService notificationService) {
+        this.notificationService = notificationService;
+        // EmailNotificationService is injected — specifically requested
+    }
+}
+
+@Service
+public class AlertService {
+
+    private final NotificationService notificationService;
+
+    // This one needs SMS specifically
+    public AlertService( @Qualifier("smsNotification") NotificationService notificationService) {
+        this.notificationService = notificationService;
+        // SmsNotificationService is injected
+    }
+}
+
+We can use both in same class as well
+
+@Service
+public class ReportService {
+    // Needs BOTH — inject both with different qualifiers
+    private final NotificationService emailService;
+    private final NotificationService smsService;
+
+    public ReportService(
+            @Qualifier("emailNotification") NotificationService emailService,
+            @Qualifier("smsNotification") NotificationService smsService) {
+        this.emailService = emailService;
+        this.smsService = smsService;
+    }
+
+	// Use whatever bean that is required at runtime according to user needs
+}
+
+
+Spring uses the class name with lowercase first letter as the default bean name
+
+@Primary and @Qualifier both solve the problem of Spring finding multiple beans of the same type. @Primary marks one bean as the default — Spring uses it whenever no specific preference is stated. @Qualifier is used at the injection point to specify exactly which bean to inject by name. In practice, you use @Primary on the most commonly used implementation and @Qualifier at specific injection points that need a different one. If neither is used and multiple beans exist, Spring throws NoUniqueBeanDefinitionException at startup.
+
+What is a "Scope"?
+How many instances of this bean should Spring create?  Scope controls the lifetime and number of instances of a bean. Spring has multiple scopes but the two you must know cold are Singleton and Prototype.
+
+Scope is singleton by default 
+The bean whatever the scope is singleton , when spring starts
+Spring creates ONE instance and stores in ApplicationContext even tough there are multiple services which are accessing the same bean the same bean instance is shared among all services
+
+In Spring (and Java EE), "state" refers to whether a bean remembers data between method calls or not.
+
+@Component // singleton by default
+public class CalculatorService {
+    
+    // No instance variables storing user data
+    
+    public int add(int a, int b) {
+        return a + b; // uses only local variables
+    }
+}
+
+The CRITICAL Rule — Singleton Beans MUST Be Stateless
+
+// ❌ DANGEROUS — stateful singleton
+@Service
+public class BookService {
+
+    // Instance variable that changes per request
+    private String currentUser; // ← SHARED ACROSS ALL THREADS
+
+    public List<String> getBooksForUser(String username) {
+        this.currentUser = username; // Thread 1 sets "Prajwal"
+
+        // Thread 2 comes in right here and sets "Arjun"
+        // Now currentUser = "Arjun" for BOTH threads
+
+        return findBooksByUser(this.currentUser); // Bug — wrong user!
+    }
+}
+
+// ✅ SAFE — stateless singleton
+@Service
+public class BookService {
+
+    // NO instance variables that change per request
+    // State travels as METHOD PARAMETERS — not stored in the object
+
+    public List<String> getBooksForUser(String username) {
+        // username lives on the STACK — each thread has its own stack
+        // No sharing between threads
+        return findBooksByUser(username); // safe ✅
+    }
+}
+
+PROTOTYPE : New Instance Every Time 
+prototype means whenever the bean is called new instance will be created each and every time , even if the bean is stateful there is no issue as each and every time new object new data .
+
+@Service
+@Scope("prototype")
+public class ReportGenerator {
+
+    private List<String> reportLines = new ArrayList<>(); // mutable state OK here
+
+    public void addLine(String line) {
+        reportLines.add(line);
+    }
+
+    public String generate() {
+        return String.join("\n", reportLines);
+    }
+}
+
+
+Important — Prototype Beans Are NOT Managed After Creation , Spring creates prototype beans but does NOT call @PreDestroy on them, You are responsible for cleanup
+
+During creation spring is aware of this so whatever the methods that are called in postconstruct that will work as it is , Like connecting to db and all we will do in postconstruct 
+But while clean up i.e predestroy spring will not manage prototype beans right so it doesnot know whether that bean exist or not so whatever the menthods closeDbConnection and all which are written in preDestroy will not be called as it is not managed by spring 
+
+SingleTon --> Stored in container , STATELESS ( we must use )
+Prototype --> handed off and forgotten , STATEFUL ( we must use )
+
+
+The Singleton Trap — Injecting Prototype Into Singleton
+
+@Service  // singleton
+public class BorrowService {
+
+    @Autowired
+    private ReportGenerator reportGenerator; // prototype
+
+    public String generateBorrowReport() {
+        reportGenerator.addLine("Borrow report");
+        return reportGenerator.generate();
+    }
+}
+```
+
+What do you think happens here?
+```
+Spring creates BorrowService (singleton) at startup
+    → Injects ReportGenerator at creation time
+    → ONE ReportGenerator instance is created and stored in BorrowService
+
+User 1 calls generateBorrowReport()
+    → Same ReportGenerator used
+User 2 calls generateBorrowReport()
+    → SAME ReportGenerator used again ← prototype is NOT creating new ones!
+
+
+The prototype scope is defeated. Because BorrowService is singleton, it holds a reference to ONE ReportGenerator forever. The prototype never creates new instances after the initial injection.
+
+If you want that to be like prototype only use application context , at runtime context will fetch the desired bean new one each time 
+
+@Service
+public class BorrowService {
+
+    @Autowired
+    private ApplicationContext context; // inject the container itself
+
+    public String generateBorrowReport() {
+        // Ask the container for a new prototype bean each time
+        ReportGenerator generator = context.getBean(ReportGenerator.class);
+        generator.addLine("Borrow report");
+        return generator.generate();
+        // new instance created every time getBean() is called ✅
+    }
+}
+
+Spring beans are singleton by default — one shared instance for the entire application lifecycle. Singleton beans must be stateless because all threads share the same object. Storing request-specific data in a singleton field causes data leaks between users. Prototype scope creates a new instance every time the bean is requested — useful for stateful objects. One important difference: Spring calls @PreDestroy on singleton beans at shutdown but NOT on prototype beans — the developer is responsible for cleanup. A common trap is injecting a prototype bean into a singleton — the prototype loses its behavior because the singleton holds onto one instance forever. The fix is to use ApplicationContext.getBean() directly when you need a fresh prototype instance
+
+			~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Common trap question:
+"What is wrong with WHERE name != NULL?"
+
+Answer:
+"Nothing returns. NULL represents UNKNOWN.
+You cannot compare with = or !=.
+The result of any comparison with NULL is UNKNOWN,
+not TRUE or FALSE.
+WHERE only includes rows where condition is TRUE.
+UNKNOWN = excluded.
+Always use IS NULL or IS NOT NULL.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+			
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,343 @@
+Before IoC, developers manually created objects using new and wired dependencies themselves. With 10+ dependencies this becomes unmanageable — wrong order causes NullPointerExceptions, adding a new dependency requires changing every place that uses the class. IoC inverts this control — instead of YOU creating objects, you hand that responsibility to Spring. You just declare what each class needs, Spring figures out the creation order, creates everything, and wires it all together. It's called Inversion because the control literally flips from developer to framework
+
+✅ BeanFactory is parent of ApplicationContext
+✅ Both create and manage beans
+✅ ApplicationContext has additional features
+✅ Event management mentioned
+✅ AOP mentioned
+
+Gap 1 — Lazy vs Eager 
+BeanFactory:
+→ Creates beans LAZILY
+→ Only when you call getBean()
+→ App starts fast
+→ Error found LATE — only when bean is first used
+
+ApplicationContext:
+→ Creates beans EAGERLY at startup
+→ All singleton beans created immediately
+→ App starts slightly slower
+→ Error found FAST — at startup before any user is affected
+
+Bean factory does not have enough features so it will have problems
+a FEATURES problem
+
+→ No events
+→ No AOP
+→ No profiles
+→ No i18n
+→ Lazy creation = errors discovered late
+
+
+
+Feature              BeanFactory        ApplicationContext
+──────────────────────────────────────────────────────────
+Bean creation        Lazy (on demand)   Eager (at startup)
+Error detection      Late (runtime)     Fast (startup)
+Event publishing     ❌                 ✅
+AOP support          ❌                 ✅
+Spring Profiles      ❌                 ✅
+i18n                 ❌                 ✅
+Used in Spring Boot  Never              Always ✅
+
+
+Bean LifeCycle
+
+✅ ComponentScan — finds classes
+✅ Dependency resolution — less dependent first
+✅ Object creation
+"Creates objects" → INJECT DEPENDENCIES → "Stored in container"
+✅ Stored in IoC container
+✅ @PostConstruct — init logic, DB connections, thread pool
+✅ Bean used during app lifetime
+When app receives SHUTDOWN SIGNAL -- Spring calls @PreDestroy automatically
+✅ @PreDestroy — resource cleanup, thread shutdown
+✅ Application shutdown
+
+Full correct order:
+1. ComponentScan     → finds @Service, @Repository etc
+2. Instantiate       → constructor called
+3. Inject deps       → dependencies wired in
+4. @PostConstruct    → your init code runs
+5. Bean READY        → stored in container, handles requests
+6. @PreDestroy       → your cleanup code runs
+7. Bean destroyed    → removed from container
+
+
+Singleton vs Prototype
+
+✅ Singleton — one instance throughout app lifetime
+✅ Prototype — new instance created each time
+✅ Singleton must be STATELESS
+✅ Spring manages singleton completely
+✅ Spring does NOT manage prototype after creation
+✅ @PostConstruct called for BOTH ✅
+✅ @PreDestroy called for singleton ✅
+✅ @PreDestroy NOT called for prototype ✅
+✅ Reason — Spring loses reference after handing off ✅
+✅ User responsible for prototype cleanup ✅
+
+Singleton should be stateless because
+
+ONE BookService object exists
+Both threads share THE SAME object
+Both threads share THE SAME fields
+
+currentUsername field:
+→ Thread 1 writes "Prajwal"
+→ Thread 2 immediately writes "Arjun"
+→ Thread 1 reads "Arjun" — WRONG
+
+The field is shared memory
+Last writer wins — unpredictable
+
+that's why all variable will be final
+
+Stateless means the bean doesn't store request-specific data in its instance fields. Since only one singleton instance exists and all threads share it, storing per-request data in fields causes race conditions — Thread 1's data gets overwritten by Thread 2. Instead, all request-specific state travels as method parameters, which live on each thread's own stack. The singleton only stores final dependencies and immutable configuration — things that never change after initialization.
+
+@Repository Extra Behavior : AUTO-CONFIGURATION , @Repository adds EXCEPTION TRANSLATION , Without @Repository: DB throws → SQLException,HibernateException (technology-specific ugly exceptions) service layer should know this 
+With @Repository:
+Spring wraps the class in a PROXY
+Catches all DB exceptions automatically
+Converts them to Spring's clean exceptions:
+SQLException → DataAccessException
+HibernateException → JpaSystemException
+
+Field Injection is untestable without spring
+
+Complete 3 reasons why constructor injection is safe :
+1. final fields — null safe, immutable, thread safe
+2. Testable — no Spring context needed
+3. Dependencies visible — clear contract
+
+Field injection is bad because dependencies are set via reflection after construction — they cannot be final, they're hidden from the constructor, and you cannot test the class without Spring. Constructor injection is better for three reasons: fields can be final ensuring they're never null or reassigned, the class is testable by just passing mock objects to the constructor, and dependencies are explicitly visible in the constructor signature. In Spring Boot 4.3+, @Autowired is not needed on a constructor when there's only one constructor — Spring auto-detects it.
+
+@EnableAutoConfiguration — auto-configures dependencies from classpath
+
+@SpringBootConfiguration
+→ Marks the class as a configuration source
+→ Means you can define @Bean methods in this class
+→ It's a specialization of @Configuration
+
+
+
+✅ Problem — same app, multiple environments
+✅ Port and config different per environment ✅
+✅ Cannot manually change before every deploy ✅
+✅ Separate yml file per environment ✅
+✅ 3 activation ways — yml, command line, env variables ✅
+✅ Docker/Kubernetes mention — production thinking ✅
+✅ @Profile("dev") — bean created only in that profile ✅
+✅ Resources created only when profile is active ✅
+
+
+
+Priority order when multiple sources conflict:
+
+application.yml says: active=dev
+
+Command line says:    --spring.profiles.active=prod
+→ Command line WINS — always highest priority
+
+Order (lowest to highest priority):
+1. application.yml
+2. application-{profile}.yml
+3. Environment variables
+4. Command line arguments ← always wins
+
+Mention this → shows depth ✅
+
+
+Both @Value AND @ConfigurationProperties
+READ FROM THE SAME application.yml file
+Neither one writes to the config file
+
+@Value:
+→ One annotation per property
+→ @Value("${library.name}") private String name;
+→ @Value("${library.max-books}") private int max;
+→ Scattered across multiple service classes
+
+@ConfigurationProperties:
+→ ONE class holds ALL related properties
+→ Spring maps yml values to fields automatically
+→ prefix="library" → maps all library.* properties
+→ Grouped, organized, type-safe
+
+
+@ConfigurationProperties:
+→ Binds GROUP of related properties to ONE class
+→ prefix="library" maps all library.* from yml
+→ camelCase field maps to kebab-case yml key
+   maxBooksPerUser ↔ max-books-per-user
+→ Supports nested objects, lists, maps
+→ Good for 5+ related properties
+
+
+1. Typo detection — IDE catches wrong property names
+                    @Value("${library.nme}") fails at RUNTIME
+                    @ConfigurationProperties → IDE shows error ✅
+
+2. Testability — create ONE object, set values, pass it
+                 @Value → must mock each property separately
+
+3. Validation — add @Validated + @NotBlank, @Min, @Max
+                Bad config caught AT STARTUP not runtime
+                @Value has no built-in validation
+
+
+library:
+  name: City Central Library
+  max-books-per-user: 5
+  admin-email: admin@library.com
+  fine-per-day: 2.50
+  allowed-genres:
+    - Fiction
+    - Science
+    - Technology
+  database:
+    host: localhost
+    port: 5432
+    name: librarydb
+
+
+@ConfigurationProperties(prefix = "library")
+@Component
+@Data  // Lombok generates getters/setters
+@Validated  // enables validation
+public class LibraryProperties {
+
+    // library.name → name
+    @NotBlank
+    private String name;
+
+    // library.max-books-per-user → maxBooksPerUser
+    // kebab-case in yml → camelCase in Java (auto mapped)
+    @Min(1) @Max(20)
+    private int maxBooksPerUser;
+
+    // library.admin-email → adminEmail
+    @Email
+    private String adminEmail;
+
+    // library.fine-per-day → finePerDay
+    @DecimalMin("0.0")
+    private double finePerDay;
+
+    // library.allowed-genres → allowedGenres (list)
+    private List<String> allowedGenres;
+
+    // library.database → nested object
+    private Database database;
+
+    // Inner class for nested config
+    @Data
+    public static class Database {
+        private String host;
+        private int port;
+        private String name;
+    }
+}
+
+
+More precise:
+@PostConstruct runs after:
+1. Constructor completes ✅
+2. ALL dependencies injected into THIS bean ✅
+
+BookService has BookRepository injected
+@PostConstruct runs after:
+→ BookService constructor done
+→ BookRepository injected into BookService
+→ NOW @PostConstruct runs
+
+Other beans like UserService, EmailService
+may not exist yet — doesn't matter
+THIS bean's deps are ready → enough ✅
+
+Why cannot we use @PostConstruct inside a constructor
+
+Real reason — Spring PROXIES not ready in constructor:
+
+@Transactional, @Cacheable, @Async
+all work through Spring AOP proxies
+
+In constructor → proxies not set up yet
+→ @Transactional won't work ❌
+→ @Cacheable won't work ❌
+
+In @PostConstruct → proxies fully ready
+→ Everything works ✅
+
+So the answer is:
+"In constructor, Spring AOP proxies are not
+ yet set up — @Transactional and @Cacheable
+ won't work. @PostConstruct is guaranteed
+ to run after ALL Spring infrastructure
+ including proxies is ready."
+
+
+Circular Dependency exception : The dependencies of some of the beans in the
+ application context form a cycle --> BeanCurrentlyInCreationException
+
+Fixing of Circular dependency 
+✅ Fix 1: Extract to third class  -- tis is the best fix
+✅ Fix 2: @Lazy
+✅ Fix 3: Setter injection
+
+Move one dependency from constructor to setter:
+@Service
+public class ServiceA {
+    private ServiceB serviceB; // NOT in constructor
+
+    @Autowired
+    public void setServiceB(ServiceB b) {
+        this.serviceB = b;
+    }
+}
+
+Both beans created independently
+Setter called AFTER both exist
+No deadlock ✅
+
+
+Circular dependency is when ServiceA needs ServiceB and ServiceB needs ServiceA. Spring detects this at startup and throws BeanCurrentlyInCreationException with a message showing the cycle. There are 3 fixes: Fix 1 — redesign by extracting shared logic to a third ServiceC so dependencies flow in one direction. Fix 2 — @Lazy on one injection point so Spring injects a proxy instead of the real bean, breaking the eager creation chain. Fix 3 — setter injection, moving one dependency from constructor to a setter so both beans can be created independently. The BEST fix is always redesign — it eliminates the cycle completely. @Lazy is a quick patch that hides the design problem. Circular dependency is a signal that two services are too tightly coupled and need to be restructured.
+
+
+When two beans implement the same interface, Spring throws NoUniqueBeanDefinitionException — it doesn't know which to inject. @Primary marks one as the default — used everywhere no specific preference is stated. @Qualifier is used at the injection point to name exactly which bean to inject. If both are present, @Qualifier wins — explicit always overrides default.
+
+
+    public BorrowService(@Qualifier("emailNotification")NotificationService notificationService) {
+        this.notificationService = notificationService;
+        // EmailNotificationService injected ✅
+    }
+
+if we use @Lazy it will create proxy bean not mock
+Proxy   → lightweight placeholder
+          same interface as real bean
+          when method called → creates real bean
+          delegates the call → returns real result
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

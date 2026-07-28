@@ -1,0 +1,172 @@
+Stack methods
+push
+peek = to return the top most element
+pop = to return and remove the top most element
+isEmpty = return true if the stack is empty
+search()= get the index of the element in the stack
+
+Bean Validation (@Valid, @NotBlank, @Size, @Email)
+
+@PostMapping
+public ResponseEntity<BookResponse> createBook(@RequestBody BookRequest request) {
+    return ResponseEntity.ok(bookService.create(request));
+}
+Client will send data like this and it will automatically get saved in database 
+{
+  "title": "",
+  "author": null,
+  "email": "notanemail",
+  "pages": -5
+}
+
+instead of this you want to throw an error message 
+
+{
+  "status": 400,
+  "message": "Validation failed",
+  "errors": {
+    "title": "Title cannot be blank",
+    "email": "Must be a valid email",
+    "pages": "Pages must be positive"
+  }
+}
+
+
+Add this validation dependency
+<!-- pom.xml -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+
+// Null checks
+@NotNull   → field cannot be null (allows "" empty string)
+@NotEmpty  → cannot be null or empty "" ( allows whitespace )
+@NotBlank  → cannot be null, empty, or "   " (whitespace)
+
+// String constraints
+@Size(min=2, max=50)  → length between 2 and 50
+@Email                → valid email format
+@Pattern(regexp="")   → must match regex
+
+// Number constraints
+@Min(value=1)         → minimum value
+@Max(value=100)       → maximum value
+@Positive             → must be > 0
+@PositiveOrZero       → must be >= 0
+@Negative             → must be < 0
+
+// Date constraints
+@Future               → date must be in future
+@Past                 → date must be in past
+@FutureOrPresent      → date must be now or future
+
+ @Valid in Controller
+
+    @PostMapping
+    public ResponseEntity<BookResponse> createBook( @Valid @RequestBody BookRequest request) {
+            // ↑
+            // @Valid triggers validation on BookRequest
+            // If any constraint fails →
+            // throws MethodArgumentNotValidException
+            // GlobalExceptionHandler catches it ✅
+
+        return ResponseEntity.status(201)
+                .body(bookService.create(request));
+    }
+
+
+
+Without @Valid — annotations on DTO do NOTHING.
+
+
+Handle in GlobalExceptionHandler
+@ExceptionHandler(MethodArgumentNotValidException.class)
+
+Request
+POST /api/books
+{
+  "title": "",
+  "author": null,
+  "email": "bademail",
+  "pages": -1
+}
+
+Response
+HTTP 400 Bad Request
+{
+  "status": 400,
+  "message": "Validation failed",
+  "timestamp": "2024-01-11T10:30:00",
+  "path": "/api/books",
+  "errors": {
+    "title":  "Title cannot be blank",
+    "author": "Author cannot be blank",
+    "email":  "Must be a valid email address",
+    "pages":  "Pages must be at least 1"
+  }
+}
+
+POST /api/books with invalid body
+         ↓
+@Valid triggers validation on BookRequest
+         ↓
+@NotBlank on title fails
+@Email on email fails
+         ↓
+Spring throws MethodArgumentNotValidException
+         ↓
+GlobalExceptionHandler catches it
+         ↓
+Extracts all field errors into Map
+         ↓
+Returns clean 400 JSON with all errors ✅
+
+"Bean Validation in Spring Boot uses annotations
+ like @NotBlank, @Email, @Size on DTO fields to
+ define constraints. @Valid on the controller method
+ parameter activates these constraints. If validation
+ fails, Spring throws MethodArgumentNotValidException.
+ We handle this in @ControllerAdvice by extracting
+ all field errors from getBindingResult().getFieldErrors()
+ and returning a structured 400 response showing
+ exactly which fields failed and why."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

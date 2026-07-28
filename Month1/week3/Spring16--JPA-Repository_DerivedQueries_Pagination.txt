@@ -1,0 +1,193 @@
+JpaRepository — Zero code data access
+
+Before JpaRepository existed you had to write this for every entity:
+
+// Save a book — YOU write all this
+public Book save(Book book) {
+    entityManager.persist(book);
+    return book;
+}
+
+// Find by id — YOU write all this
+public Book findById(Long id) {
+    return entityManager.find(Book.class, id);
+}
+
+// Delete — YOU write all this
+public void delete(Long id) {
+    Book book = findById(id);
+    entityManager.remove(book);
+}
+
+Write this for 10 entities = 100s of lines of repetitive code.
+
+With JpaRepository — Zero Implementation
+
+bookRepository.save(book)          // INSERT or UPDATE
+bookRepository.findById(id)        // SELECT WHERE id=?
+bookRepository.findAll()           // SELECT * FROM books
+bookRepository.count()             // SELECT COUNT(*)
+bookRepository.deleteById(id)      // DELETE WHERE id=?
+bookRepository.existsById(id)      // SELECT 1 WHERE id=?
+
+
+Before JpaRepository, you talked to the database through EntityManager directly.
+
+Your Code → EntityManager → Hibernate → PostgreSQL
+
+EntityManager is just a middleman — you called its methods manually to save, find, delete
+entityManager.persist(book);        // save
+entityManager.find(Book.class, id); // find
+entityManager.remove(book);         // delete
+entityManager.merge(book);          // update
+
+You had to inject and manage EntityManager in every service class. Lots of boilerplate. Easy to make mistakes.
+
+Spring took EntityManager and hid it completely inside JpaRepository.
+
+EntityManager = low level DB tool. JpaRepository = Spring wrapper that hides it completely.
+
+Spring Reads Your Method Name
+You just write a method name — Spring generates the SQL automatically.
+
+@Repository
+public interface BookRepository extends JpaRepository<Book, Long> {
+
+    List<Book> findByAuthor(String author);
+
+}
+
+You wrote zero SQL. Spring reads the method name findByAuthor and generates:
+
+SELECT * FROM books WHERE author = ?
+
+The Pattern — Method Name = SQL
+
+// findBy + FieldName
+List<Book> findByAuthor(String author);
+// → WHERE author = ?
+
+// findBy + FieldName + Condition
+List<Book> findByAvailableTrue();
+// → WHERE available = TRUE
+
+// findBy + FieldName + Containing + IgnoreCase
+List<Book> findByTitleContainingIgnoreCase(String keyword);
+// → WHERE LOWER(title) LIKE LOWER('%keyword%')
+
+// findBy + Field1 + And + Field2
+List<Book> findByAuthorAndAvailableTrue(String author);
+// → WHERE author = ? AND available = TRUE
+
+
+The Building Blocks
+findBy      → WHERE
+And         → AND
+Or          → OR
+Containing  → LIKE %?%
+IgnoreCase  → LOWER()
+True/False  → = TRUE / = FALSE
+OrderBy     → ORDER BY
+
+These are all called Derived Queries
+
+When Derived Queries Are Not Enough — @Query
+
+Sometimes your query is too complex for a method name. Use @Query
+
+// JPQL — uses class names not table names
+@Query("SELECT b FROM Book b WHERE b.author = :author AND b.available = true")
+List<Book> findAvailableByAuthor(@Param("author") String author);
+
+// Native SQL — use actual table names
+@Query(value = "SELECT * FROM books WHERE author = ?1", nativeQuery = true)
+List<Book> findByAuthorNative(String author);
+
+JPQL vs Native SQL:
+
+JPQL        → uses Java class names (Book, not books)
+            → database independent
+            → preferred
+
+Native SQL  → uses actual table names (books)
+            → database specific
+            → use only when JPQL can't do it
+
+A derived query is a query that Spring Data JPA automatically generates just by reading your method name — without you writing any SQL or JPQL
+
+
+
+Pagination and Sorting with Pageable
+
+// You have 10,000 books in database
+bookRepository.findAll();
+
+// This returns ALL 10,000 books at once
+// → Huge memory usage
+// → Slow response
+// → Frontend crashes trying to display 10,000 rows
+
+Nobody wants to see 10k records at once
+
+Solution — Pagination
+Return data in pages like Google search results.
+
+Page 1 → books 1-10
+Page 2 → books 11-20
+Page 3 → books 21-30
+...and so on
+
+Step 1 — Create a Pageable object
+
+// PageRequest.of(pageNumber, pageSize, sort)
+Pageable pageable = PageRequest.of(0, 10, Sort.by("title").ascending());
+//                               │   │
+//                               │   └── 10 books per page
+//                               └────── page number (starts from 0)
+
+Step 2 — Pass to repository
+
+Page<Book> bookPage = bookRepository.findAll(pageable);
+
+
+Step 3 — Page object contains everything
+
+bookPage.getContent()       // List of books on this page
+bookPage.getTotalElements() // total books in database (10,000)
+bookPage.getTotalPages()    // total pages (1000)
+bookPage.getNumber()        // current page number (0)
+
+
+@GetMapping
+public ResponseEntity<Page<BookResponse>> getBooks(
+    @RequestParam(defaultValue = "0")     int page,
+    @RequestParam(defaultValue = "10")    int size,
+    @RequestParam(defaultValue = "title") String sortBy) {
+
+    // Step 1 — build pageable
+    Pageable pageable = PageRequest.of(page, size, Sort.by(sortBy).ascending());
+
+    // Step 2 — fetch from DB
+    Page<Book> bookPage = bookRepository.findAll(pageable);
+
+    // Step 3 — convert Book → BookResponse and return
+    return ResponseEntity.ok(bookPage.map(bookMapper::toResponse));
+}
+
+
+
+Write the JpaRepository method for: all books by author, sorted by title ascending, paginated
+
+
+Page<Book> findByAuthor(String author, Pageable pageable);
+
+Pageable pageable = PageRequest.of(0, 10, Sort.by("title").ascending());
+Page<Book> books = bookRepository.findByAuthor("Robert Martin", pageable);
+
+Just add Pageable as last parameter — Spring handles the rest!
+
+Pageable    → carries page number, size, sort info
+PageRequest → creates a Pageable object
+Page<T>     → holds results + metadata (totalPages, totalElements)
+
+Your Spring pagination API is already infinite scroll ready. Frontend just increments page number on each scroll and appends results.

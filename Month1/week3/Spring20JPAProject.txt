@@ -1,0 +1,24 @@
+JPA = Java Persistence API.
+
+"This Java class IS a database table." Instead of writing SQL by hand, you mark a class with @Entity and JPA handles the SQL for you.
+EAGER — Load user and book immediately when loading BorrowRecord
+LAZY — Only load user or book when you actually call getUser() or getBook().
+
+A transaction is a group of database operations that must all succeed or all fail. No half-states allowed.
+
+@EntityGraph : In your repository, tell JPA: "When you fetch borrows, also JOIN users and books."
+
+public interface BorrowRepository extends JpaRepository<BorrowRecord, Long> {
+    
+    @EntityGraph(attributePaths = {"user", "book"})
+    List<BorrowRecord> findAll();
+}
+
+That's it. One annotation. JPA now generates one JOIN query instead of N+1.
+
+-- Generated SQL:
+SELECT br.*, u.*, b.*
+FROM   borrow_records br
+LEFT JOIN users u ON u.id = br.user_id
+LEFT JOIN books b ON b.id = br.book_id;
+

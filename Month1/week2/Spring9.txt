@@ -1,0 +1,351 @@
+@PathVariable, @RequestParam, @RequestBody, @RequestHeader
+
+When a client sends a request to your API, data can come from 4 different places:
+1. URL path        → GET /api/books/123
+2. Query string    → GET /api/books?page=0&size=10
+3. Request body    → POST /api/books  Body: {"title":"Clean Code"}
+4. Headers         → GET /api/books  Authorization: Bearer token123
+
+Spring has one annotation for each.
+1) @PathVariable — Data FROM the URL Path
+
+@GetMapping("/{id}")           // {id} = placeholder
+public ResponseEntity<Book> getById(@PathVariable Long id) { 
+     // extracts 123 from URL
+    // id = 123
+}
+
+// GET /api/users/5/books/3
+@GetMapping("/users/{userId}/books/{bookId}")
+public ResponseEntity<BorrowRecord> getBorrow(
+        @PathVariable Long userId,   // = 5
+        @PathVariable Long bookId) { // = 3
+}
+
+// When variable name differs from placeholder
+@GetMapping("/{book-id}")
+public ResponseEntity<Book> getById( @PathVariable("book-id") Long bookId ) {
+    // "book-id" in URL maps to bookId in Java
+}
+
+Use for: IDENTIFYING a specific resource
+
+/api/books/123        → which book? book 123
+/api/users/5          → which user? user 5
+/api/orders/99/items  → items of order 99
+
+Rule: if it IDENTIFIES the resource → path variable
+
+
+2) @RequestParam — Data FROM Query String
+
+URL: GET /api/books?page=10&size=20&available=true
+
+everything after ? = query params
+
+@GetMapping
+public ResponseEntity<List<Book>> getBooks(@RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "10")  int size, @RequestParam(required = false)     Boolean available) {
+    // page = 10
+    // size = 20
+    // available = true (or null if not provided)
+}
+
+
+// defaultValue — use this if param not provided
+@RequestParam(defaultValue = "0") int page
+// GET /api/books      → page = 0  (default used)
+// GET /api/books?page=2 → page = 2
+
+// required — false means optional
+@RequestParam(required = false) Boolean available
+// GET /api/books              → available = null
+// GET /api/books?available=true → available = true
+
+// name — when param name differs from variable
+@RequestParam(name = "sort-by") String sortBy
+// GET /api/books?sort-by=title → sortBy = "title"
+
+
+When to Use @RequestParam
+
+Use for: FILTERING, SORTING, PAGINATION
+
+/api/books?author=Bloch       → filter by author
+/api/books?page=0&size=10     → pagination
+/api/books?sort=title&order=asc → sorting
+/api/books?available=true     → filter available
+
+Rule: if it FILTERS or MODIFIES the query → request param
+
+Pagination in SQL is the technique of retrieving data in chunks (pages) instead of fetching all rows at once. This is useful when you have large datasets and want to display them in pages (like page 1, page 2, etc.).
+
+@PathVariable vs @RequestParam — Key Difference
+
+@PathVariable:
+→ Part of the URL structure
+→ REQUIRED — URL won't match without it
+→ Identifies a specific resource
+→ GET /api/books/123
+
+@RequestParam:
+→ Optional additions after ?
+→ Can be optional with defaultValue
+→ Filters or configures the response
+→ GET /api/books?page=0&size=10
+
+Real world analogy:
+PathVariable  = room NUMBER in a hotel (required to find room)
+RequestParam  = room PREFERENCES (optional — smoking/non-smoking)
+
+3) @RequestBody — Data FROM Request Body
+
+// POST /api/books
+// Body: {"title":"Clean Code","author":"Robert Martin"}
+
+
+@PostMapping
+public ResponseEntity<Book> create(
+        @RequestBody BookRequest request) {
+    // Spring reads JSON body
+    // Jackson converts JSON → BookRequest object
+ }
+
+
+How Jackson deserializes
+
+JSON arrives:
+{
+  "title": "Clean Code",
+  "author": "Robert Martin",
+  "available": true
+}
+
+Jackson:
+1. Creates new BookRequest object
+2. Reads "title" → calls setTitle("Clean Code")
+3. Reads "author" → calls setAuthor("Robert Martin")
+4. Reads "available" → calls setAvailable(true)
+5. Returns fully populated BookRequest ✅
+
+Your method receives ready-to-use Java object
+
+When to Use @RequestBody
+Use for: CREATE or UPDATE operations
+→ POST (create new resource)
+→ PUT  (full update)
+→ PATCH (partial update)
+
+NOT used for:
+→ GET  (no body in GET requests)
+→ DELETE (usually no body)
+
+4) @RequestHeader — Data FROM HTTP Headers
+
+// Request headers:
+// Authorization: Bearer eyJhbGc...
+// Accept-Language: en-US
+
+@GetMapping("/secure")
+public ResponseEntity<String> secure(
+        @RequestHeader("Authorization") String authHeader,
+        @RequestHeader(value = "Accept-Language",
+                      defaultValue = "en") String lang) {
+    // authHeader = "Bearer eyJhbGc..."
+    // lang = "en-US" or "en" if not provided
+}
+
+When to use @RequestHeader
+Use for:
+→ JWT token extraction (before adding Spring Security)
+→ API versioning (X-API-Version: 2)
+→ Client identification (User-Agent)
+→ Correlation IDs (X-Request-ID: abc123)
+
+Spring provides four annotations to extract data from different parts of an HTTP request. @PathVariable extracts data embedded in the URL path — used to identify a specific resource like /api/books/123. @RequestParam extracts query string parameters after the ? — used for filtering, sorting, and pagination. It supports defaultValue for optional params. @RequestBody deserializes the JSON request body into a Java object using Jackson — used for POST and PUT requests. @RequestHeader extracts HTTP headers — commonly used for JWT tokens before Spring Security takes over.
+
+DTO's Problems with existing entity
+
+Problem 1 — Security Hole
+Client sends:
+POST /api/books
+{
+  "id": 1,                    ← sets their own ID
+  "title": "Clean Code",
+  "author": "Robert Martin",
+  "costPrice": 0,             ← sets sensitive field
+  "internalNotes": "hacked"   ← sets internal field
+}
+
+Jackson blindly maps ALL fields
+Client just set fields they should NEVER touch ❌
+
+Problem 2 — You Expose Sensitive Data
+GET /api/books/1 returns:
+{
+  "id": 1,
+  "title": "Clean Code",
+  "author": "Robert Martin",
+  "available": true,
+  "costPrice": 250.00,      ← client sees cost price ❌
+  "internalNotes": "...",   ← internal data leaked ❌
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+
+Problem 3 — DB Change Breaks API
+You rename DB column:
+"author" → "author_name"
+
+@Column(name = "author_name")
+private String author;
+
+Your API response changes:
+Before: {"author": "Robert Martin"}
+After:  {"authorName": "Robert Martin"}  ← field name changed!
+
+Every client app breaks ❌
+API contract violated ❌
+
+DTOs (Data Transfer Objects)
+
+DTO =a simple class that defines EXACTLY what goes in and out of your API. Nothing more. Nothing less.
+
+Entity  = your DB model (internal)
+DTO     = your API model (external contract)
+Entity changes → DTO stays same → API unaffected ✅
+
+
+Three Classes You Need
+1. BookRequest — What client sends to CREATE
+2. BookResponse — What you return to client
+3. BookMapper — Converts between Entity and DTO
+
+
+public class BookRequest {
+
+    private String title;   // client provides this
+    private String author;  // client provides this
+
+    // Getters and setters
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+    public String getAuthor() { return author; }
+    public void setAuthor(String author) { this.author = author; }
+}
+
+public class BookResponse {
+
+    private Long id;          // client needs this
+    private String title;     // client needs this
+    private String author;    // client needs this
+    private boolean available; // client needs this
+
+    // NO costPrice   — sensitive, never expose
+    // NO internalNotes — internal, never expose
+    // NO updatedAt   — client doesn't need this
+
+    // Getters and setters
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+    public String getAuthor() { return author; }
+    public void setAuthor(String author) { this.author = author; }
+    public boolean isAvailable() { return available; }
+    public void setAvailable(boolean available) { this.available = available; }
+}
+
+
+@Component
+public class BookMapper {
+
+    // Entity → Response DTO (for GET endpoints)
+    public BookResponse toResponse(Book book) {
+        BookResponse response = new BookResponse();
+        response.setId(book.getId());
+        response.setTitle(book.getTitle());
+        response.setAuthor(book.getAuthor());
+        response.setAvailable(book.isAvailable());
+        // costPrice NOT mapped — stays internal ✅
+        return response;
+    }
+
+    // Request DTO → Entity (for POST/PUT endpoints)
+    public Book toEntity(BookRequest request) {
+        Book book = new Book();
+        book.setTitle(request.getTitle());
+        book.setAuthor(request.getAuthor());
+        book.setAvailable(true); // always true on creation
+        // id NOT set — DB generates it ✅
+        return book;
+    }
+}
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Book {
+
+    private Long id;
+    private String title;
+    private String author;
+    private boolean available;
+
+    // Internal fields — client should NEVER see these
+    private Double costPrice;        // how much we paid for it
+    private String internalNotes;    // staff notes
+    private String supplierCode;     // supplier reference
+    private LocalDateTime createdAt; // when added to system
+    private LocalDateTime updatedAt; // last modified
+}
+
+
+
+DTOs — Data Transfer Objects — are simple classes that define exactly what goes in and out of your API. You should never expose your entity directly for three reasons. First, security — clients can set fields like ID or sensitive internal data. Second, data leakage — entities may have sensitive fields like passwords or cost prices that should never leave the server. Third, tight coupling — if you rename a DB column, your API contract breaks. With DTOs, you control exactly what the client sends and receives. A BookRequest has only the fields a client needs to create a book. A BookResponse has only the fields a client needs to display a book. A mapper converts between them. Your entity can change freely — the API stays stable.
+
+
+
+Even if we send whole data and restrict from UI
+If costPrice is in the JSON response:
+→ User opens browser DevTools
+→ Looks at Network tab
+→ Sees the full JSON response
+→ Sees costPrice = 250.00
+
+Without DTO:
+Server sends → 500 bytes of JSON
+              (including sensitive fields)
+
+Client UI shows → only 4 fields
+                  (hides the rest)
+
+But:
+→ All 500 bytes travelled over network
+→ Anyone can intercept → sees everything
+→ Browser DevTools → sees everything
+→ Mobile app decompiled → sees everything
+
+
+3 classes feel like more work upfront
+But they save MUCH more work later:
+
+Entity      → knows about DATABASE
+BookRequest → knows about API INPUT rules
+BookResponse→ knows about API OUTPUT rules
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,325 @@
+Right now, your borrow-service knows where user-service lives because you told it — via an env var in docker-compose.yml:
+USER_SERVICE_URL: http://user-service:8081
+
+There's exactly one user-service. What if you scale to 3 instances for higher throughput?
+User-service is always at a known address. What if it crashes and restarts on a different port? What about cloud deployments where IPs change?
+You know about user-service ahead of time. What if a new service is added next week? You'd have to edit borrow-service's config and redeploy it.
+
+Service discovery removes all three. The idea:
+	Services register themselves with a registry when they start. Other services ask the registry "where is service X right now?" and get back a live, up-to-date list of instances.
+	You stop hardcoding addresses. You start asking by name.
+
+The two flavors — client-side vs server-side discovery
+There are two ways to wire this. Eureka is client-side. Knowing both makes the interview answer sharp.
+
+When all the services start up all of them registers themselves with the eureka server , when borrow service needs the info from user-service borrow service just calls the eureka server and the server responds back with one of the instance of user-service and you will call that user service for that instance when work is done you forget the instance for subsequent calls you just repeat the same steps again and again. This is client side discovery which is Eureka. Eureka here just gives back the info job is done by the borrow service which is client itself 
+
+
+In Server Side Discover : In this the client borrow-service would just call the server / separate piece of software which is load balancer / proxy / Kubernetes which will receive the request and forward it to the user-service instance and the borrow service never know which instance of user service it has called
+
+Why does this matter? Why not just always use server-side?
+1. Speed.
+Client-side: 1 network hop (borrow-service → user-service).
+Server-side: 2 hops (borrow-service → proxy → user-service).
+Every Feign call gets ~1-2ms faster. Across millions of calls, that adds up.
+
+2. Failure modes.
+Server-side: if the proxy/load balancer dies, everything stops — nobody can reach anybody.
+Client-side: if Eureka dies, existing calls keep working, because every service has already cached the registry. They just can't see brand-new services until Eureka recovers.
+
+Big picture: Kubernetes does server-side. Eureka does client-side. In a Kubernetes shop you rarely need Eureka because Kubernetes Services give you discovery for free. But knowing Eureka teaches you what Kubernetes is doing under the hood, and many companies still use Eureka (especially in non-Kubernetes deployments or Netflix-stack lineage).
+
+What Eureka actually is A Spring Boot application
+It runs an in-memory registry — a ConcurrentHashMap mapping service names to lists of instances. Services POST to register, GET to look up, and PUT every 30 seconds as a heartbeat.
+The interface is plain REST. No exotic protocol. You can literally curl Eureka's endpoints.
+Eureka has two roles played by Spring Boot apps:
+
+Eureka Server --> @EnableEurekaServer --> IS the registry. Holds the map. Accepts registrations and lookups.
+Eureka Client --> Auto Configured By Eureka Client Starter --> Registers itself on startup, sends heartbeats, fetches the registry to use for outbound calls
+
+Your project will have 1 server (the new eureka-server module) and 4 clients (your existing services).
+
+When a Eureka client starts:
+1) Register — POSTs its info to Eureka:
+   POST /eureka/apps/USER-SERVICE
+   { hostName: "192.168.1.42", port: 8081, status: "UP", ... }
+2) Heartbeat every 30 seconds — PUTs to Eureka to say "still alive":
+   PUT /eureka/apps/USER-SERVICE/192.168.1.42:user-service:8081
+3) Fetch registry every 30 seconds — GETs the full registry (or a delta) and caches it locally. This is why client-side discovery is fast: lookups are 
+   in-memory in your own process.
+4) On shutdown — DELETEs its registration (graceful deregistration).
+
+If a client doesn't heartbeat for 90 seconds, Eureka marks it DOWN and eventually evicts it from the registry. That 90-second window is intentional — it gives clients a chance to recover from a transient network blip before being declared dead.
+
+Caveat for interview: This means there's a window of up to 90 seconds where a dead service is still in the registry. Callers will try to reach it and fail. Circuit breakers (which you already implemented on Day 32-33) cover exactly this gap. Eureka + Circuit Breaker is the standard combination — they're complementary, not redundant.
+
+CAP theorem says a distributed system can guarantee at most 2 of 3:
+Consistency — every node sees the same data
+Availability — every request gets a response
+Partition tolerance — system keeps working despite network splits
+
+Eureka chose AP over CP
+Network partitions in real systems are unavoidable (cables break, switches reboot, cloud zones split). So practically, you choose between CP and AP. Eureka chose AP.
+
+Imagine your data is handled by two receptionists in two different offices, and normally they're constantly syncing their notes so both always have identical, up-to-date info.
+One day, the phone line between the two offices breaks — they can't talk to each other anymore. This is a network partition ("partition tolerance" just means: the system must keep coping when this happens, and it will happen — cables break, servers reboot, cloud zones lose connection).
+Now a customer calls Receptionist A and asks "What's Bob's current address?" — but A can't check with B. A has exactly two choices:
+Answer anyway with the address she last had. The customer always gets a reply, but it might be outdated (B may have changed it). → This is choosing Availability.
+Refuse to answer: "I can't confirm this is current right now, sorry." The info she'd give is never wrong... because she gives none. The request fails. → This is choosing Consistency.
+
+What AP means concretely:
+During a network partition, Eureka servers keep responding to clients with whatever registry they have, even if it's stale.
+Clients get an answer (possibly wrong), never an error.
+The tradeoff: you might call a dead instance for a few minutes.
+
+Why this is right for service discovery:
+A microservices system where service discovery returns errors during a network blip is a system that goes fully offline during every network blip. That's worse than getting a stale instance list and having your circuit breakers catch the bad calls. Netflix designed Eureka this way after watching ZooKeeper-based discovery (which is CP — refuses to answer during partitions) cause outages.
+
+Eureka is an AP system. It chooses availability over consistency during network partitions — it'll return potentially stale registry data rather than fail. This is the right tradeoff for service discovery because the cost of a stale instance list is a few failed calls (which circuit breakers catch), while the cost of refusing to answer is total system outage. ZooKeeper-based discovery is CP and got Netflix burned, which is why they built Eureka.
+
+Self-preservation mode — Eureka's most quirky feature
+
+1) Imagine: it's 3 AM. A network blip prevents 80% of your services from sending heartbeats to Eureka for 2 minutes. Normally, Eureka would mark them DOWN and evict them. Now your registry is empty. All cross-service calls fail. Cascading outage. You wake up.
+
+2) To prevent this, Eureka has self-preservation mode. If Eureka stops receiving the expected number of heartbeats (the threshold is configurable, default ~85%), it concludes "this is probably MY problem, not the services' problem" and stops evicting instances until heartbeats recover.
+
+This means during a real network partition, Eureka keeps serving the registry even though some entries might be stale. The bet: it's better for callers to get stale entries and fail individual requests (circuit breakers handle this) than to lose the whole registry
+Trade-off: During DEVELOPMENT, where you frequently kill and restart services, self-preservation can get annoying — Eureka holds onto dead entries because you "killed too many at once." We'll disable it on the Eureka server during dev. It stays on in production.
+
+This is a classic interview question — "What is self-preservation mode in Eureka and why does it exist?"
+
+How Feign + Eureka integrate
+Instead of using a hardcoded URL, Feign asks Spring Cloud LoadBalancer "give me an instance of user-service." LoadBalancer asks Eureka's local cache, gets the list, picks one (round-robin by default).
+
+Feign uses the same spring.application.name value that the service registered with. So if user-service has spring.application.name=user-service, the Feign client uses name="user-service". Eureka stores service names in uppercase internally (USER-SERVICE), but the lookup is case-insensitive — don't lose sleep over the casing.
+
+What Eureka is NOT
+-Eureka is not a load balancer. Spring Cloud LoadBalancer does the load balancing. Eureka just tells you who's available.
+-Eureka is not a health-checker. It receives heartbeats but doesn't actually call services to check their health. That's why a service can heartbeat fine while having a broken DB connection — Eureka thinks it's UP. Actuator's /health endpoint and Kubernetes liveness probes do real health checks. (You can integrate Eureka with Actuator to make heartbeats reflect actual health — we'll touch this briefly.)
+-Eureka is not an API gateway. Routing, auth, rate limiting — that's Spring Cloud Gateway.
+-Eureka is not a config server. Centralized config is Spring Cloud Config.
+
+@EnableEurekaServer — This is the magic. A single annotation turns a plain Spring Boot app into a fully functional Eureka registry.
+
+Q: How does Eureka Server work under the hood?
+"It's a Spring Boot application annotated with @EnableEurekaServer that auto-configures an in-memory registry — basically a ConcurrentHashMap of service names to instance lists — exposed over REST. Clients POST to register, PUT every 30 seconds to heartbeat, and GET to fetch the registry. The dashboard at port 8761 is a built-in JSP view of the registry. In production you'd run multiple Eureka servers replicating to each other for HA."
+
+Interview snippet — what registration costs and what it provides
+
+Q: What's the operational overhead of having every service register with Eureka?
+"Each client sends one heartbeat HTTP request every 30 seconds and fetches the registry every 30 seconds. For a registry of even hundreds of services, that's negligible — under 1% CPU and a few KB/s per client. The cost is tiny compared to what you get: real-time visibility into who's running, automatic load balancing, no hardcoded URLs, and resilience to dynamic environments. The one operational concern is making Eureka itself highly available, which is solved by running 2-3 Eureka servers replicating to each other in production."
+
+Q: How does a Feign client find the target service when you don't specify a URL?
+"Without a URL, Feign delegates to Spring Cloud LoadBalancer, which reads from a service registry — in our case Eureka. On startup, each service registers with Eureka and periodically fetches the registry into a local cache. When borrow-service calls user-service via Feign, LoadBalancer reads the cached registry, picks an instance (round-robin by default), and Feign makes a direct HTTP call. Eureka is only involved during the periodic registry refresh, not on every call — so per-call latency is just one network hop, same as a hardcoded URL. The big win is that I can scale user-service to 10 instances and Feign automatically load-balances across them without any code change."
+
+Optional — the resilience demo
+If you have a few minutes, this one's worth seeing because it really crystallizes the role of circuit breakers in a discovery system.
+
+Send some borrow POSTs — they alternate between 8082 and 8092
+Stop instance on 8092 (red stop button in IntelliJ)
+Immediately send another batch of borrow POSTs
+Watch what happens
+
+For ~30 seconds after killing 8092:
+
+LoadBalancer's cache still thinks 8092 exists
+Roughly half your requests get routed to 8092
+Those calls fail to connect (TCP refused)
+borrow-service's circuit breaker on book-service kicks in → fallback runs OR error returned
+The OTHER half go to 8082 and work fine
+
+After ~30 seconds:
+
+LoadBalancer refreshes from Eureka's cached registry
+Eureka may still show 8092 as UP because the eviction interval hasn't hit yet
+Eventually (within ~95 seconds total), Eureka evicts the dead 8092
+LoadBalancer learns 8092 is gone
+All requests now route only to 8082, no failures
+
+Restart 8092 → within ~30 seconds, it's back in the rotation. Self-healing system.
+This shows you exactly why circuit breakers matter even with Eureka: there's a discovery lag window where dead instances are still in the registry. Circuit breakers cover that window.
+
+Add eureka-server to docker-compose.yml
+Now we bring the whole Eureka setup into Compose. By the end of this part, docker compose up will start a 7-container stack — Eureka + MySQL + Kafka + 4 application services — and all internal service-to-service discovery will work exactly like it does in IntelliJ.
+
+docker compose up -d
+
+Self-Preservation Mode & Failure Modes
+eureka:
+  server:
+    enable-self-preservation: false
+
+Let me explain what it does and why production usually has it ON (default) but we turned it OFF for development.
+
+Imagine you're running 100 services in production, all registered with Eureka. Normal day, normal heartbeats — Eureka receives roughly 100 × 2 = 200 heartbeats per minute (each client heartbeats every 30 seconds).
+Suddenly, a network blip happens — a switch reboots, a subnet partition occurs, whatever. For 90 seconds, 80 of those services can't reach Eureka. They're alive and healthy, just can't deliver heartbeats.
+Without self-preservation:
+
+Eureka stops receiving heartbeats from 80 clients
+After 90 seconds (lease expiration), Eureka declares them all DEAD
+Eureka evicts 80 entries from the registry
+Any caller asking "where is X?" gets "X doesn't exist"
+All calls to those 80 services fail
+Total system outage — even though every service was actually fine
+
+This actually happened to Netflix in their early days. The cure was worse than the disease — Eureka was correctly following its rules but ended up causing the very outage it was supposed to prevent.
+With self-preservation:
+
+Eureka notices it's losing way more heartbeats than usual
+Concludes: "This is probably MY network problem, not 80 services dying simultaneously"
+Stops evicting instances until heartbeat rate recovers
+Callers continue getting (possibly stale) addresses, but most services ARE actually still alive at those addresses
+Circuit breakers in callers handle the genuinely dead ones
+When the network recovers, heartbeats resume, system continues normally
+No false-positive mass eviction
+
+The tradeoff is clear: accept some stale data during partitions, in exchange for not causing system-wide outages from network blips.
+
+
+How it decides the network is broken
+Eureka tracks the expected heartbeat rate. It knows how many instances are registered, so it knows roughly how many heartbeats per minute it should receive. The threshold is ~85% of expected.
+If incoming heartbeats drop below 85% of expected, self-preservation activates:
+
+The Eureka dashboard shows a giant red warning: "EMERGENCY! EUREKA MAY BE INCORRECTLY CLAIMING INSTANCES ARE UP WHEN THEY'RE NOT. RENEWALS ARE LESSER THAN THRESHOLD AND HENCE THE INSTANCES ARE NOT BEING EXPIRED JUST TO BE SAFE."
+Evictions pause
+Stays paused until heartbeat rate recovers above the threshold
+
+It's both a feature and an alarm bell — the warning banner is meant to wake the ops team up.
+
+Why we disabled it for development
+In dev, you frequently:
+
+Kill services and restart them
+Run only some of the services at any given moment
+Stop entire Compose stacks
+
+Each of those drops the heartbeat rate massively (because you genuinely killed instances, not because of a network blip). Self-preservation then refuses to evict the dead ones. The dashboard fills with ghost instances. You see services as "UP" that you killed an hour ago
+
+In production we leave self-preservation on (default) because the cost of a false-positive mass eviction during a network blip is system-wide outage. In dev we turn it off because we want immediate eviction feedback when we kill instances manually
+
+What if Eureka Server itself crashes?
+When Eureka crashes:
+1) Existing inter-service calls keep working. Why? Because every client has cached the registry locally via fetch-registry: true. The cache lives in the client's JVM memory. As long as the cache has the addresses, Feign calls work.
+2) New service registrations can't happen. A service starting up can't register; Feign clients in that service can't fetch their initial registry.
+3) Heartbeats fail. Each client tries to PUT to Eureka and gets connection refused. They log warnings, keep their local cache, retry on the next heartbeat interval.
+4) When Eureka restarts: Clients re-register on the next heartbeat (within 30 seconds). The registry rebuilds. Everything's fine.
+
+This is a beautiful property of client-side discovery: Eureka downtime is mostly invisible to running services. Compare to server-side discovery, where load balancer downtime breaks every cross-service call instantly.
+Eureka downtime doesn't break existing calls because every client caches the registry. New service registrations and discoveries fail until Eureka returns, but running services continue to function — that's the resilience benefit of client-side discovery.
+
+What if multiple Eureka Servers are running (production setup)?
+In production, you run 2 or 3 Eureka servers that replicate to each other (called a "peer-aware Eureka cluster"). Each server is configured with the addresses of the others; they exchange registration data.
+A client lists ALL Eureka URLs in its service-url.defaultZone
+
+service-url:
+  defaultZone: http://eureka1:8761/eureka/,http://eureka2:8761/eureka/,http://eureka3:8761/eureka/
+
+If eureka1 dies, the client tries eureka2 — automatically
+
+What if a service registers but is actually broken (DB connection lost, etc.)?
+Eureka doesn't know. Eureka only checks heartbeats. If the heartbeat thread is alive, Eureka thinks the service is healthy.
+
+But Spring Boot has a feature: integrate Eureka health with Actuator. When you do this, the heartbeat to Eureka reflects the real health status (DB up? Kafka reachable? Custom health indicators?). If the DB connection drops, Spring sets the service's status to DOWN in the heartbeat, Eureka marks it DOWN, callers skip it.
+
+eureka:
+  client:
+    healthcheck:
+      enabled: true
+
+By default Eureka heartbeats only confirm the JVM is alive — not that the application's dependencies are healthy. For richer health, integrate Spring Boot Actuator with Eureka so the heartbeat status reflects real health checks
+
+Q1: What is service discovery and why do you need it in microservices?
+"In a microservices system, services need to call each other over the network, but instance addresses are dynamic — services scale up and down, restart on different ports, get redeployed. Hardcoding URLs doesn't work past trivial setups. Service discovery solves this by introducing a registry — services register themselves on startup and other services look them up by name. The system becomes elastic — you can add or remove instances without touching any caller's config. In my project I use Eureka as the registry, and Spring Cloud LoadBalancer handles the per-call instance selection."
+
+Q2: What's the difference between client-side and server-side discovery?
+"In client-side discovery, the caller queries the registry, picks an instance, and makes the call directly. The discovery library lives inside the caller. Eureka with Spring Cloud LoadBalancer is the classic example. Pro: one network hop per call. Con: every language needs a discovery client library.
+In server-side discovery, the caller sends to a fixed load balancer or proxy, which queries the registry and forwards. Kubernetes Services and AWS ELB work this way. Pro: clients are dumb — they just make HTTP calls. Con: extra hop per call, and the proxy becomes a critical infrastructure piece.
+In Kubernetes you typically don't need Eureka because Kubernetes Services give you server-side discovery for free. Eureka shines in non-Kubernetes Spring deployments or when you want the no-extra-hop benefit."
+
+Q3: Walk me through what happens when a service starts up with Eureka.
+"When user-service boots, the Eureka client library reads spring.application.name and the Eureka URL from config, then POSTs to Eureka's REST API with metadata — hostname, IP, port, service name, status URLs. Eureka stores this in an in-memory registry. user-service then starts a heartbeat thread that PUTs to Eureka every 30 seconds. It also fetches the full registry from Eureka and caches it locally — this cache is what Feign and LoadBalancer consult for outbound calls. On graceful shutdown, the client sends a DELETE to deregister cleanly."
+
+Q4: Why did Eureka choose AP over CP in the CAP theorem?
+"Eureka chose Availability over Consistency for service discovery specifically. The reasoning is empirical: Netflix learned that during network partitions, a registry that refuses to answer is catastrophically worse than one that returns stale data. Stale entries cause individual failed calls that circuit breakers handle. A registry refusing to answer causes total system outage. ZooKeeper-based discovery is CP and caused Netflix outages early on. Eureka was built specifically to avoid that — return some answer, accept brief staleness, let callers handle the edge cases with retries and circuit breakers."
+
+Q5: What is self-preservation mode in Eureka and why does it exist?
+"Self-preservation kicks in when Eureka detects heartbeat rates drop below about 85% of expected. Instead of evicting all those instances as DOWN — which would gut the registry — Eureka concludes 'this is probably a network problem on MY side' and stops eviction until heartbeats recover. The dashboard shows a red warning so ops gets notified.
+The reason it exists: during a network blip, you'd otherwise mass-evict perfectly healthy services and cause a system-wide outage from a transient issue. The tradeoff is some staleness during partitions — but circuit breakers catch any genuinely dead instances. Self-preservation is on by default in production. I turned it off in dev because I frequently kill instances manually and want immediate eviction feedback."
+
+Q6: What happens when Eureka itself crashes?
+"Existing inter-service calls continue working. Every Eureka client has cached the registry locally via fetch-registry: true, so Feign and LoadBalancer keep resolving services from that in-memory cache. New service registrations fail until Eureka returns, and the cache eventually goes stale, but for the seconds-to-minutes range, callers don't notice. When Eureka restarts, clients re-register on their next heartbeat. This resilience is a major advantage of client-side discovery — compare it to server-side, where a load balancer going down breaks every cross-service call instantly.
+In production you'd run 2-3 Eureka servers replicating to each other so a single Eureka failure doesn't even affect new registrations."
+
+Q7: Why do you still need circuit breakers if you have Eureka?
+"They solve different problems and they're complementary. Eureka has up to a 90-second window between an instance dying and being evicted from the registry — three missed heartbeats. During that window, callers will try to reach the dead instance and fail. Circuit breakers handle that gap: after a threshold of failures, they fail fast and route to fallback methods, avoiding the slow timeout-then-error pattern.
+Beyond that gap, circuit breakers also handle transient failures even within healthy instances — slow database queries, momentary network jitter, downstream degradation. Eureka can't see those problems because it only tracks the heartbeat, not the actual application health. Eureka plus Resilience4j is the standard pairing in Spring microservices."
+
+Q8: How does Feign find the target service when you don't specify a URL?
+"When you write @FeignClient(name = "user-service") without a URL, Feign delegates to Spring Cloud LoadBalancer. LoadBalancer asks the local Eureka-fetched registry cache for instances of user-service, applies a load balancing strategy — round-robin by default — to pick one, and Feign builds the actual URL with the chosen instance's address. The HTTP call goes directly to that instance.
+Eureka isn't called per Feign invocation — the registry is cached and refreshed every 30 seconds. So per-call latency is one network hop, identical to a hardcoded URL, but the routing is dynamic."
+
+Q9: How would you scale a service horizontally?
+"Run multiple instances under the same spring.application.name. All instances register with Eureka under that name. LoadBalancer in callers automatically discovers all instances and round-robins between them. I demonstrated this locally by running two book-service instances on ports 8082 and 8092 with the same application name — borrow-service split its calls evenly across both without any code or config change.
+In production, you don't do this manually — Kubernetes Horizontal Pod Autoscaler watches CPU or custom metrics and scales pods automatically. The discovery pattern is identical, just automated."
+
+Q10: What's the role of spring.application.name and why is it so important?
+"It's the service's identity in Eureka. Each instance registers under this name, and callers reference it via @FeignClient(name = "..."). Two different services with the same name would be treated as instances of the same service, which would cause complete chaos with load balancing landing on random services. It's the entire glue of the discovery system. I make sure each microservice has a unique, deliberate name set in application.yml."
+
+Q11: Why prefer-ip-address: true?
+"By default, Eureka registers using the hostname Spring resolves at startup. On Windows that can be something machine-specific and unreachable from other services, like DESKTOP-XYZ123. With prefer-ip-address: true, the instance registers using its IP — which is universally routable both locally and in Docker bridge networks. Inside Compose, each service registers its container IP, and Docker DNS plus that IP make inter-container Feign calls work transparently."
+
+Q12: How do you make Eureka itself highly available?
+"Run multiple Eureka servers in a peer-aware cluster — typically 2 or 3 servers configured to replicate registration data to each other. Each server is itself a Eureka client of the others, so when one server receives a registration, it propagates to the peers. Clients list all Eureka URLs in their defaultZone, and if one server is unreachable, the client automatically tries the others. Combined with self-preservation mode, this makes Eureka effectively always available for clients, even during single-server failures."
+
+
+Q13: What are alternatives to Eureka and when would you use them?
+"Three main alternatives. Consul is CP rather than AP — better when you need stronger consistency, supports multi-datacenter, includes a built-in key-value store and richer health checks. Apache Zookeeper is CP, older, used by Hadoop, Kafka pre-KRaft. Zookeeper-as-discovery caused Netflix the outages that motivated Eureka. Kubernetes Services are the modern answer in K8s environments — service discovery and load balancing are built into the platform via CoreDNS and kube-proxy, so you don't need Eureka at all. In a non-Kubernetes Spring deployment, Eureka is still the natural choice. In a Kubernetes shop, Kubernetes Services replace Eureka entirely."
+
+Q14: How is your Eureka setup different in production vs development?
+"Three main differences. First, self-preservation is on by default in production — I turned it off in dev for faster eviction feedback. Second, production runs multiple Eureka servers in a replicated cluster for HA, while dev runs one. Third, in production you'd integrate Spring Boot Actuator health checks with Eureka so heartbeats reflect real application health, not just JVM liveness — I haven't enabled that yet in my project. Beyond that, the registration pattern is identical."
+
+Q15: A Eureka-registered service is healthy in the dashboard but calls to it keep failing. How do you debug?
+"Several places to check. First, the service is in the registry but the cached registry in the caller might be stale — restart the caller or wait for the next 30-second refresh. Second, the registered IP might be wrong — for example, if the service registered a hostname that's not resolvable from the caller's network. I'd verify with eureka.instance.prefer-ip-address: true and check the actual address shown on the dashboard. Third, the service might be UP in heartbeat terms but its actual functionality broken — maybe the DB connection is down. Integrating Actuator health with Eureka catches this. Fourth, network ACLs or firewall rules might block caller-to-service traffic even though heartbeats to Eureka work. I'd validate connectivity directly — for example, in my Compose setup I use docker compose exec caller wget http://target/actuator/health to isolate the network from the application."
+
+
+
+
+In Production each instance runs in its own container (or pod, or VM) with its own private IP address and its own network namespace. Because they're network-isolated from each other, all three instances can bind the exact same port — 8080 — without colliding. Port 8080 inside container A is a completely different socket from port 8080 inside container B, since they have different IPs.
+
+Production — one image, N isolated copies, every instance uses the identical config and the identical port. You never touch the port. You change a replica count.
+Concretely, in Kubernetes you build one image and write something like:
+
+spec:
+  replicas: 3        # <- this is the only thing you change to scale
+  template:
+    spec:
+      containers:
+        - name: book-service
+          image: lms/book-service:1.0
+          ports:
+            - containerPort: 8080   # same for every replica
+
+Every service run in same port 8080 every user service runs on 8080 but they will be running in different container right each container has unique ip address with that we will try to communicate whenever the service registers it's ip will also be registered.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

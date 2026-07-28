@@ -1,0 +1,395 @@
+ IDENTIFYING BOUNDED CONTEXTS + MAVEN MULTI-MODULE SETUP
+
+1. Domain-Driven Design — What It REALLY Is
+Every software project has TWO worlds:
+The business world — actual humans who run a library. They talk about "borrowing", "members", "overdue fines", "reserved copies", "catalog cards".
+The technical world — developers who write code. They talk about "REST endpoints", "JPA entities", "primary keys", "foreign keys", "DTOs".
+
+Domain-Driven Design (DDD) is a software design approach the code should reflect the business domain SO CLOSELY that a business person could understand the structure (not the syntax, but the structure).
+
+The 4 Core DDD Concepts You Must Know
+Concept 1: Ubiquitous Language --> The SAME vocabulary used by business people, designers, AND developers — everywhere — in conversations, documentation, AND code.
+In your LMS, if business calls them "members", your code should NOT call them "users". Use ONE word. Everywhere.
+Business: "members borrow books"
+Code: Member member = memberRepo.findById(id); borrowService.checkout(member, book);
+
+Concept 2: Domain Model
+A representation of the business domain in code — the classes, their relationships, and the business rules they enforce. 
+A Book has a title, author, and ISBN
+A Member can borrow up to 5 books at a time
+A borrow record has a due date 14 days after the borrow date
+An overdue borrow incurs a fine of ₹2 per day
+These are not technical rules. These are BUSINESS rules. The domain model encodes them in code.
+
+Concept 3: Bounded Context (The Big One)
+A boundary within which a specific domain model is valid and consistent. Different bounded contexts can use the same word to mean different things.
+
+The word "User" in your LMS:
+
+In the Authentication context, a "User" means:
+Email, password hash, last login, MFA settings
+Used for login, password reset, JWT generation
+Owned by user-service
+
+In the Borrowing context, a "User" means:
+Member ID, name, current borrow count, fine balance
+Used for borrowing eligibility checks, overdue tracking
+Owned by borrow-service
+
+Same word ("User"), different meanings, different data, different bounded contexts.
+
+The right approach: each bounded context has ITS OWN concept of User, with only the fields IT cares about. They share only the user ID across contexts.
+
+Concept 4: Aggregate
+Think about your phone's Contacts app. 
+Prajwal K
+├── Phone: +91-9876543210
+├── Email: prajwal@example.com
+├── Home Address: 123 MG Road, Bangalore
+├── Office Address: Tech Park, Whitefield
+└── Birthday: 15 June
+
+You CANNOT walk up to "123 MG Road" floating in the database somewhere and change it directly. The address belongs TO Prajwal. You must go THROUGH Prajwal to change it. That's an aggregate. The Contact (Prajwal) is the boss. Everything inside (phones, addresses, birthday) is its property. You only change things through the boss.
+
+An aggregate is a group of related items that always belong together, AND you must go through ONE main item (the "boss") to change anything inside.
+
+Part 2: Identifying Bounded Contexts in YOUR LMS
+
+Step 1: List Every Feature in Your LMS
+
+#Feature		Endpoint
+1Register a new account	POST /api/auth/register
+2Login (get JWT)	POST /api/auth/login
+3Refresh JWT		POST /api/auth/refresh
+4Update profile		PUT /api/users/{id}
+5View profile		GET /api/users/{id}
+6Change password	POST /api/auth/change-password
+7Assign role to user	POST /api/users/{id}/roles
+8Add a new book		POST /api/books
+9Update book details	PUT /api/books/{id}
+10Delete a book		DELETE /api/books/{id}
+11Search books by title	GET /api/books?title=
+12View book details	GET /api/books/{id}
+13View book availability	GET /api/books/{id}/availability
+14Borrow a book		POST /api/borrow
+15Return a book		POST /api/borrow/{id}/return
+16Extend borrow period	POST /api/borrow/{id}/extend
+17View borrow history	GET /api/users/{id}/borrows
+18Check overdue borrows	GET /api/borrow/overdue
+19Calculate fine	GET /api/borrow/{id}/fine
+20Send borrow confirmation email	(internal, called on borrow)
+21Send overdue reminder email		(internal, scheduled job)
+22View notification history		GET /api/notifications
+
+Step 2: Group Features by "What They're About"
+
+USER stuff:        1, 2, 3, 4, 5, 6, 7
+BOOK stuff:        8, 9, 10, 11, 12, 13
+BORROW stuff:      14, 15, 16, 17, 18, 19
+NOTIFICATION stuff: 20, 21, 22
+
+Step 3: Apply the 3 Boundary Tests
+You don't accept these groups blindly. You verify each one with three tests:
+Test 1: The Ubiquitous Language Test
+Within each candidate group, the vocabulary should be consistent. Across groups, the same word might mean different things.
+User group vocabulary: user, account, password, role, email, profile, authentication, JWT, session
+Book group vocabulary: book, title, author, ISBN, copies, availability, category, catalog
+Borrow group vocabulary: borrow, member, return, due date, overdue, fine, extension, loan period
+This is the ubiquitous language test in action: each context has its own language. If two candidate contexts share IDENTICAL vocabulary, they might actually be one context.
+
+Test 2: The Change Together Test
+If a business requirement changes, which features change together?
+Scenario A: "We want to add two-factor authentication."
+→ Affects features 1, 2, 3, 6 (all in USER group)
+→ Does NOT affect borrow, book, or notification logic
+→ Confirms: 2FA is a USER context concern
+
+The rule: features that change together should live in the same context. Features that change for different reasons belong in different contexts
+
+Test 3: The Data Ownership Test
+USER context owns: users table, roles table, user_roles table
+BOOK context owns: books table, authors table, categories table
+BORROW context owns: borrow_records table, extensions table
+NOTIFICATION context owns: notifications table, email_templates table
+a context can REFERENCE data from other contexts (by ID), but only one context OWNS each piece of data.
+
+Step 4: Draw the Context Map
+Now that you've confirmed 4 bounded contexts, you need to map HOW they relate to each other. This is called a Context Map.
+
+Step 5: Understand Context Relationship Types (DDD Patterns)
+When two contexts must talk, the RELATIONSHIP has a name in DDD. Knowing these names will make you sound senior in interviews.
+
+Relationship 1: Customer-Supplier
+What it is: One context (Customer) depends on another (Supplier). The Supplier publishes data; the Customer consumes it. The Supplier prioritizes Customer needs.
+In your LMS: Borrow context (Customer) and User context (Supplier). Borrow needs user data; User must provide it reliably.
+
+Relationship 2: Conformist
+What it is: Downstream context just accepts whatever the Upstream gives, no matter how messy.
+Example in real life: A small startup using a 3rd-party payment API. They have no influence — they just conform to whatever Stripe/Razorpay gives them.
+
+Relationship 3: Anti-Corruption Layer (ACL) — IMPORTANT
+What it is: A "translator" layer between two contexts that prevents one context's model from "corrupting" the other's vocabulary.
+ Borrow context calls User context. User context returns a User object with 20 fields (email, password hash, last login, MFA settings, profile picture URL, etc.). Borrow context doesn't need 20 fields — it only needs id, name, currentBorrowCount
+
+Relationship 4: Published Language
+A well-defined, versioned data format that one context publishes for others to consume. When Borrow publishes a Kafka event, the JSON structure of that event IS a published language: 
+
+Step 6: The Final Bounded Context Decision Document
+After all this analysis, you produce a decision document. This is what you'd commit to your repo and use in an interview to explain your design:
+
+Part 3: Multi-Module Maven Setup
+
+Multi-Module Maven — one parent project containing multiple child modules.
+
+✅ Single command to build everything: mvn clean install
+✅ Shared parent POM = consistent versions, no duplication
+✅ Modules can depend on each other (common code in a shared module)
+✅ Industry standard for learning and small-to-medium projects
+
+A Maven module is a separate Maven project (its own pom.xml, own source folder, own build output) that is part of a larger PARENT project.
+When you run mvn clean install on the parent, Maven automatically builds all child modules in the correct order.
+
+library-parent/                      ← PARENT (no code, just pom.xml)
+│
+├── pom.xml                          ← Parent POM (defines shared versions, plugins)
+│
+└── library-monolith/                ← FIRST CHILD MODULE (your existing code)
+    ├── pom.xml                      ← Child POM (inherits from parent)
+    ├── src/main/java/com/library/   ← All your Month 1 code lives here
+    ├── src/main/resources/
+    └── src/test/java/...
+
+As we move on we will keep on adding services
+
+library-parent/
+├── pom.xml
+├── library-monolith/        ← Today
+├── user-service/            ← Tomorrow (Day 31)
+├── book-service/            ← Day 32
+├── borrow-service/          ← Day 33
+└── notification-service/    ← Day 34
+
+POM stands for Project Object Model. The pom.xml is the configuration file that tells Maven:
+
+WHO this project is — groupId, artifactId, version (the "Maven coordinates")
+WHAT it depends on — other JARs needed to build/run
+HOW to build it — Java version, plugins, packaging type
+WHERE it sits in the family tree — parent POM, child modules
+
+<?xml version="1.0" encoding="UTF-8"?> — XML declaration. Says "this is an XML file using UTF-8 character encoding." Boilerplate. Always present
+<project xmlns="..."> — Root element of the file. The xmlns is the XML namespace — tells Maven what schema this file follows. Boilerplate.
+<modelVersion>4.0.0</modelVersion> — The version of the POM format. ALWAYS 4.0.0 for Maven 2 and Maven 3. Don't change this
+<parent>...</parent> — Your project INHERITS from another POM. Here, it inherits from spring-boot-starter-parent
+	Spring Boot's official parent POM that defines hundreds of useful defaults (Java version, plugin configurations, dependency versions, etc.). This is 	why you don't need to specify versions for most Spring dependencies — the parent handles it.
+<groupId>com.library</groupId> — Your organization or company ID. Like a Java package name. Industry convention: reverse domain name (e.g., com.amazon, org.apache). You used com.library
+<artifactId>library-management-system</artifactId> — The project's name. Becomes the JAR file name: library-management-system-0.0.1-SNAPSHOT.jar.
+<version>0.0.1-SNAPSHOT</version> — Current version. SNAPSHOT means "still under development, might change." Released versions drop SNAPSHOT (e.g., 1.0.0)
+<name>library-management-system</name> — Human-readable name. Cosmetic.
+<properties> — Key-value variables used elsewhere in the POM. java.version=17 says "compile with Java 17."
+<dependencies> — The list of external libraries your project needs. Each <dependency> has groupId + artifactId + (sometimes) version.
+<build><plugins> — Build tools that run during mvn clean install. The spring-boot-maven-plugin is what lets you do mvn spring-boot:run and creates an executable JAR.
+
+Three identifiers that define every Maven artifact
+This trio is called the GAV coordinates:
+GroupId
+ArtifactId
+Version
+
+
+<modules>
+    <module>library-monolith</module>
+</modules>
+
+<dependencies> = "add these JARs to my classpath." Every dependency listed here is ACTUALLY pulled in.
+<dependencyManagement> = "if any child module asks for these, here are the rules (version, scope, etc.)." NOTHING is pulled in unless a child specifically asks.
+
+Imagine 4 child modules all need spring-cloud-starter-openfeign. Without <dependencyManagement>, each module specifies its own version. They could drift apart (one uses 4.0, another 4.1). Bugs ensue
+
+WHY multi-module — single command builds everything, shared versions, shared parent
+
+A BOM is a special kind of POM file used to centrally manage versions of related dependencies. The name comes from manufacturing — a "bill of materials" is the list of parts that go into a product.
+A BOM is a POM that says: "Here are the versions of all these related libraries that work together." You import it once, then declare dependencies without versions.
+
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-dependencies</artifactId>
+            <version>3.2.0</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+
+<dependencies>
+    <!-- No version needed! BOM provides it -->
+    <dependency>
+        <groupId>org.springframework</groupId>
+        <artifactId>spring-core</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.springframework</groupId>
+        <artifactId>spring-web</artifactId>
+    </dependency>
+</dependencies>
+
+
+<packaging>pom</packaging> — it produces no JAR. It's pure metadata.
+
+Domain-Driven Design is a software design approach where the code structure closely reflects the business domain. Its core idea is that developers and business people should share the same vocabulary — what DDD calls 'ubiquitous language' — and the code should encode business rules, not just data operations.
+DDD has four core building blocks: ubiquitous language for shared vocabulary, domain models that represent business concepts in code, bounded contexts that define boundaries within which a model is consistent, and aggregates that group related objects under a single root.
+DDD becomes critical in microservices because service boundaries should align with bounded context boundaries. Splitting microservices any other way — by technical layers or convenience — leads to distributed monoliths
+
+A bounded context is a boundary within which a specific domain model is internally consistent — the same word means the same thing throughout, and the model enforces consistent rules. Across bounded contexts, the same word can have different meanings.
+For example, 'User' in an authentication context contains email, password hash, and security settings. In a borrowing context, 'User' might be called 'Member' and contains borrow limit and fine balance — same physical person, different model.
+Bounded contexts matter because they prevent the monolithic anti-pattern of creating one giant shared model that everything depends on. They directly map to microservice boundaries — each microservice owns one bounded context, and that gives true independence.
+
+I follow a three-step process. First, I list every feature or use case the system supports. Second, I group them by what they're fundamentally about — not which endpoint or controller, but which business concept they manipulate. Third, I validate each group with three tests:
+Vocabulary consistency — within a group, the same words are used consistently. Across groups, the same word might mean different things.
+Change-together test — features that change for the same business reason belong in the same context. If a new requirement affects multiple groups, they might not be truly separate.
+Data ownership — each context owns specific data, and other contexts only REFERENCE it by ID, not own it.
+Then I draw a context map showing dependencies between contexts. This tells me which to extract first when splitting into microservices — always extract least-dependent contexts first.
+
+An aggregate is a cluster of related domain objects that are treated as a single unit for data consistency. One object in the cluster is the Aggregate Root — it's the only entry point for changes to anything inside the aggregate.
+For example, in a borrowing system, BorrowRecord is an aggregate root that contains the borrow data plus a list of extensions. External code cannot directly modify an extension — it must call methods on BorrowRecord, like borrowRecord.extend(7). This lets BorrowRecord enforce business rules in one place — like 'maximum 2 extensions' or 'cannot extend a returned book' — making them impossible to bypass.
+Aggregates matter for microservices because they define transactional boundaries. One aggregate = one transaction = one service's responsibility. Splitting an aggregate across services creates distributed transaction problems.
+
+An Entity is a domain object with a unique identity that persists over time. Two Entities with the same fields are still different objects if their IDs differ — like two users with the same name but different IDs.
+A Value Object has NO identity. It's defined entirely by its values. Two Value Objects with identical fields ARE equal — like a 'Money' object holding amount and currency. Value Objects are typically immutable.
+An Aggregate is a cluster of Entities and Value Objects treated as a unit, with one Entity designated as the Aggregate Root. It's not a different kind of object — it's a pattern for grouping them.
+In my LMS, BorrowRecord is an Entity AND the Aggregate Root. Its 'borrowed at' timestamp is a Value Object. Its list of BorrowExtensions are Entities inside the aggregate.
+
+An Anti-Corruption Layer is a translation layer between two bounded contexts that prevents one context's model from corrupting another's vocabulary or design.
+When microservice A calls microservice B, if A directly uses B's DTOs, A becomes coupled to B's schema. Every time B adds a field, A might be affected.
+The ACL solves this by translating B's model into A's vocabulary. For example, when borrow-service calls user-service and gets back a UserDto with 20 fields, the ACL inside borrow-service converts it to a MemberView with only the 3 fields borrow-service cares about — and uses borrow-service's preferred name 'Member' instead of 'User'. This keeps borrow-service's internal code independent of user-service's choices.
+ACLs are especially important when integrating with third-party APIs or legacy systems whose models you can't control.
+
+<dependencies> actually pulls JARs into your project's classpath — every dependency listed is included at build time.
+<dependencyManagement> does NOT pull anything in. It just declares 'if any child module asks for this dependency, here's the version, scope, and exclusion rules to apply.' It's a centralized rulebook.
+The pattern is used in multi-module projects: the parent POM declares versions in <dependencyManagement>, and child modules say which dependencies they actually need WITHOUT specifying versions. This guarantees version consistency across all modules and removes duplication.
+
+Why use multi-module Maven? Why not separate Git repositories?
+Both are valid — the trade-off depends on team size and maturity.
+Multi-module Maven gives you a single command to build everything, a single parent POM enforcing consistent versions and plugins, easy sharing of common code via a shared module, and a single repository making refactoring across services straightforward. It's ideal for learning, small teams, or when services are tightly related.
+Separate repositories give true independence — each service has its own CI/CD, its own versioning, its own deployment cadence, and teams can move at completely different speeds. It's the right choice for large organizations with dozens of services and many independent teams.
+Many companies start with multi-module and migrate to multi-repo as the organization scales. The key insight: the repository structure is a coordination tool, not the architecture itself.
+
+<packaging>jar</packaging> means this Maven project produces an actual JAR file — compiled classes packaged into a deployable artifact. This is the default and what most projects use.
+<packaging>pom</packaging> means this project produces no output of its own — it's purely a configuration container. Parent POMs in multi-module projects MUST use pom packaging. When you run mvn install on a pom-packaged project, Maven installs the POM file itself to the local repository, where children can find it for inheritance.
+Other packaging types include war for old-style web applications and ear for enterprise applications, though both are rare in modern microservices development
+
+
+
+JAR --> Java Archive 			contains 	Java classes + Resources		Anywhere Java runs (JVM)
+WAR --> Web Application Archive	 	contains 	A web app (servlets, JSPs, HTML)	Inside a servlet container (Tomcat, Jetty)
+EAR --> Enterprise ARchive 		contains 	Multiple WARs + JARs + EJBs 		Inside a full Java EE server (WildFly, WebSphere)
+
+When to use JAR
+
+✅ Spring Boot applications (modern default)
+✅ Microservices (each service is its own fat JAR)
+✅ Library code shared between projects
+✅ Command-line tools
+✅ Anything that should be self-contained
+
+
+2. WAR — Web Application ARchive
+What it is
+A WAR is a ZIP file that packages a complete web application — designed to be DEPLOYED INTO an external servlet container like Tomcat, Jetty, or JBoss.
+
+Key differences from JAR:
+
+Has a WEB-INF/ folder (mandatory for WARs)
+Has a web.xml (or modern annotations) for servlet configuration
+Can contain web resources (HTML, JSP, CSS, images)
+Has a lib/ folder with dependency JARs inside it
+
+Type A: "Run and Done" programs
+These programs run from start to finish, then exit. They do ONE job. Logical programs only runs with main method. They live only once
+These programs have a clear beginning and ending. They live for milliseconds or seconds, then die.
+
+
+Type B: "Always Running" programs
+These programs start once, then KEEP RUNNING. They don't have an ending. They sit there, waiting.
+
+Examples:
+WhatsApp on your phone → keeps running, listens for messages
+A music player → keeps running, plays music
+These programs have a beginning, but no ending. They die only when you force them to (close the app, shut down the computer).
+
+Part 2: What Makes a Program "Always Running"?
+Simple. An infinite loop.
+
+Part 3: But an Infinite Loop Doing Nothing is Useless
+A useful "always running" program has a loop that WAITS FOR SOMETHING TO HAPPEN, then REACTS.
+
+WhatsApp:
+It WAITS for a new message to arrive
+When a message arrives, it WAKES UP, shows a notification, plays a sound
+Then goes back to waiting
+
+START
+LOOP FOREVER:
+    WAIT until something happens
+    DO something about it
+    GO BACK TO WAITING
+
+This pattern is called an event loop or listening loop. It's how all interactive programs work.
+
+Part 4: Now Let's Talk About Networks
+Take two computers — Computer A and Computer B. They're connected to the same network (could be your home WiFi, could be the internet).
+If Computer A wants to send a message to Computer B, can it just shout the message into the network? No. The message would just float in the network and nobody on Computer B would notice.
+For Computer B to receive the message, a program on Computer B must be LISTENING for messages.
+
+For two computers to talk over a network, the receiving side MUST have an always-running program that LISTENS for incoming messages.
+
+That always-running, network-listening program has a name.
+It's called a "server".
+
+A server is a program that runs forever and listens for messages coming from the network.
+
+That's the entire definition. Three properties:
+
+It runs (just like any program)
+It runs FOREVER (has an infinite loop)
+The loop listens for NETWORK messages
+
+The word "server" is overloaded. People use it for TWO completely different things, and this confuses everyone learning backend.
+Meaning 1: A server PROGRAM (software)
+This is what we just defined. A program that listens.
+
+Meaning 2: A server COMPUTER (hardware)
+A physical computer in a data center that's running server programs. Examples: "Amazon's servers handle billions of requests."
+
+When someone says "the server is down", they could mean:
+
+The server PROGRAM crashed (software)
+The server COMPUTER lost power (hardware)
+
+How Do Programs Find Each Other? (IP and Port)
+If you're going to send a message to a server program over the network, you need TWO pieces of information:
+1. WHICH computer? — The IP address
+2. WHICH program on that computer? — The port
+
+
+Servers don't just sit there waiting. They DO things when messages arrive.
+The classic pattern is request and response:
+
+Client sends a REQUEST to the server (a message)
+Server processes the request (looks up data, does calculations, etc.)
+Server sends a RESPONSE back (the answer)
+Client receives the response
+
+
+
+
+
+
+
+
+
+
+
+
+

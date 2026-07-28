@@ -1,0 +1,260 @@
+Part 1: What "hardening" means + the system-wide error contract.
+Imagine your Library system is a big hospital with separate departments — cardiology, radiology, pharmacy. Those are your services: user-service (8081), book-service (8082), borrow-service (8083), notification-service (8084). When something goes wrong with a patient, you want every department to fill out the exact same incident form — same boxes: what happened, how bad, which patient, when. A doctor moving between departments instantly understands any form.
+
+Now imagine the opposite: cardiology writes a paragraph, radiology scribbles a code, pharmacy just says "error." The front desk can't make sense of any of it
+
+That "same incident form every department agrees to use" is your error contract — one predictable JSON shape that every service returns for every failure. And instead of inventing your own form, you adopt the industry-standard template: RFC 7807, "Problem Details for HTTP APIs." Spring Boot 3 has a built-in object for it called ProblemDetail.
+
+Part 1 has 2 moves
+Make error handling consistent — every service speaks the same error language.
+Upgrade the language — from your old hand-rolled {status, message} DTO to the standard ProblemDetail.
+
+Why it exists
+1)One shape to parse. A client (or your gateway, or a frontend) writes one error-parsing routine instead of one per service. The moment shapes differ, every consumer needs N branches. That's the brittleness hardening removes.
+2)It's machine-readable, not just human-readable. RFC 7807 gives every error a type (a URI naming the kind of problem). A client can branch on type programmatically — "if it's a book-out-of-stock problem, show the waitlist button" — instead of string-matching the message text (which breaks the day someone fixes a typo in the message).
+3)The distributed multiplier. In your monolith, errors stayed inside one process. Now borrow-service (8083) calls book-service (8082) via Feign. When book-service fails, borrow-service has to understand that failure and decide what to tell its own caller. If both services share the same contract, that's trivial. If they don't, borrow-service is parsing a foreign error format mid-request. (We go deep on this in Part 2 — this is the boundary problem.)
+
+@RestControllerAdvice is literally @ControllerAdvice + @ResponseBody. It's a specialized @Component — a real bean in the application context — that acts as a global exception interceptor for every @RequestMapping handler in that app.
+
+The flow when a controller method throws:
+The exception propagates out of your handler back to the DispatcherServlet
+The DispatcherServlet runs its HandlerExceptionResolver chain. The one that matters here is ExceptionHandlerExceptionResolver.
+That resolver looks through your @RestControllerAdvice beans for an @ExceptionHandler method whose parameter type matches the thrown exception. Most-specific match wins — it walks up the exception's class hierarchy. So @ExceptionHandler(ResourceNotFoundException.class) beats @ExceptionHandler(Exception.class) for that exception; the broad Exception handler is your catch-all safety net.
+
+
+How do you keep error handling consistent across your microservices?"
+"Each service has a global @RestControllerAdvice that turns exceptions into a single standard shape — I use RFC 7807 Problem Details, which Spring Boot 3 supports natively via the ProblemDetail class, so responses come back as application/problem+json. To keep it consistent rather than just present, I pulled the advice and the shared exceptions into a common module every service depends on, so they all speak the same error language — same type, title, status, detail, plus extension fields like a traceId for cross-service log correlation. I also enable spring.mvc.problemdetails.enabled so even Spring's built-in exceptions, like validation failures and 404s, conform to the same contract. The one exception is my API gateway — it's on the reactive WebFlux stack, so it can't use a WebMVC advice; it produces the same shape through a reactive ErrorWebExceptionHandler instead
+
+
+You already have a multi-module Maven project. You add one new module — call it common — and put the shared error stuff there:
+
+library-parent/                                  ← your parent pom
+├── common/                                      ← NEW shared module
+│   └── src/main/java/com/library/common/exception/
+│        ├── GlobalExceptionHandler.java         ← the @RestControllerAdvice
+│        └── ResourceNotFoundException.java       ← your custom exception, moved here
+│
+├── user-service/      (code under com.library.user)
+├── book-service/      (code under com.library.book)
+├── borrow-service/    (code under com.library.borrow)
+├── notification-service/
+├── api-gateway/
+└── eureka-server/
+
+Then each service that needs it adds common as a dependency in its own pom.xml:
+
+<dependency>
+    <groupId>com.library</groupId>
+    <artifactId>common</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</dependency>
+
+Part 2 — Errors across service boundaries
+1. What it is (plain words first)
+Picture borrow-service (8083) as a receptionist. When a borrow request comes in, the receptionist can't answer alone — she has to phone the book department (book-service, 8082) and the user department (user-service, 8081) to check things. Those phone calls are your Feign clients.
+
+Now, the book department phones back: "We don't have book 999." That's a perfectly clear, valid answer — a 404.
+Here's the question that defines this whole part: what does the receptionist tell the original caller?
+A good receptionist relays the real reason: "the book department says that book doesn't exist" → caller sees a 404.
+A bad receptionist, the moment a call doesn't come back as a cheerful "yes," just shrugs: "uh, something went wrong on our end" → caller sees a 500
+
+
+By default, Feign is the bad receptionist. And that's the bug at the heart of Part 2: book-service correctly said 404, but the person calling borrow-service ends up seeing a 500 Internal Server Error. The status got mistranslated at the boundary.
+
+Feign treats any non-2xx response from a downstream as a problem. Its built-in ErrorDecoder.Default turns that response into a FeignException — and FeignException is a RuntimeException.
+
+Tracing : 
+book-service throws ResourceNotFoundException → its advice (Part 1) → returns 404 with a ProblemDetail body. Correct.
+That 404 travels over the network to borrow-service's Feign client.
+Feign's default decoder sees "not 2xx" → throws FeignException.NotFound.
+Nobody in borrow-service catches it. It propagates out of borrow-service's controller.
+borrow-service's own catch-all @ExceptionHandler(Exception.class) (Part 1) grabs it → returns 500.
+
+3. How it works internally (and the fix: ErrorDecoder)
+Feign exposes an interface, ErrorDecoder, with one method:
+
+Exception decode(String methodKey, Response response)
+
+Feign calls this whenever a downstream returns non-2xx, and whatever exception you return gets thrown into your code. So you take control of the translation: read response.status(), decide what exception borrow-service should throw, and — because of Part 1 — you can even read the ProblemDetail body that book-service sent and carry its detail/type forward.
+
+This is the payoff I promised in Part 1: because every service speaks the same error contract, the boundary translation is trivial. borrow-service deserializes a shape it already understands.
+
+book-service throws ResourceNotFoundException → 404 ProblemDetail over the wire → borrow-service ErrorDecoder reads the 404 + body → throws borrow-service's own ResourceNotFoundException → borrow-service advice → 404 ProblemDetail to the client. Status preserved end-to-end.
+
+Now there are two completely different failure modes, and conflating them is a real production bug:
+
+Mode A — book-service is UP but says "no" (404). This is a business answer, not a failure. book-service is healthy. You want a clean 404 to the client, and you do not want the circuit breaker to count this — and definitely don't want a fallback.
+Mode B — book-service is DOWN / timing out / 5xx (infrastructure failure). This is what the circuit breaker exists for. Repeated failures open the breaker; the fallback method runs and returns a degraded response.
+
+The trap: a FeignException.NotFound is still an exception, so a naively-configured Resilience4j will happily count your 404s toward its failure rate — and a burst of "book not found" requests will trip the breaker even though book-service is perfectly fine. Now healthy requests start failing-fast for no reason.
+
+The fix is to tell Resilience4j to ignore business exceptions, so only genuine infra failures count:
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      bookService:
+        # only real failures (5xx, timeouts, connection refused) move the failure-rate needle
+        ignore-exceptions:
+          - com.library.common.exception.ResourceNotFoundException
+
+
+When a downstream service returns an error, what does the caller see, and how do you control it?
+By default, OpenFeign turns any non-2xx from a downstream into a FeignException, which is a runtime exception — so if I don't intervene, a clean 404 from book-service propagates up and my global handler in borrow-service reports it as a 500. The status gets mistranslated at the boundary. I fix that with a custom ErrorDecoder: it reads the downstream's actual status and the Problem Detail body and re-throws my own domain exception, so a downstream 404 stays a 404 to the client. The subtlety is the circuit breaker — I have to separate business failures from infrastructure failures. A 404 means the service is healthy and the answer is just 'no,' so I add it to Resilience4j's ignore-exceptions; only 5xx and timeouts count toward the failure rate that opens the breaker. Otherwise a burst of 'not found' responses would trip the breaker even though the downstream is fine. And because my gateway is on the reactive stack, it can't use a controller advice — it produces the same Problem Detail shape through a high-precedence ErrorWebExceptionHandler
+
+Part 3 — Actuator & health across all services.
+
+Why does this matter in your system specifically? Because three different parties keep asking "is this service OK?" and each needs a programmatic answer, not a guess:
+
+Docker Compose (Day 40) — your healthcheck + condition: service_healthy ordering needs to know when a service is truly up before starting the next one.
+Eureka (Day 36) — needs to decide whether to keep a service listed as available for lb:// routing.
+The load balancer / gateway / you — needs to know who's safe to send traffic to.
+
+Two things to see here 
+Liveness = "is my own process sane?" Readiness = "can I serve traffic, given my dependencies and warmup state?"
+
+Spring Boot has this built in. It tracks LivenessState (CORRECT/BROKEN) and ReadinessState (ACCEPTING_TRAFFIC/REFUSING_TRAFFIC) through the application lifecycle — readiness flips to ACCEPTING after ApplicationReadyEvent (fully started) and to REFUSING during graceful shutdown. You expose them as health groups:
+
+/actuator/health/liveness
+/actuator/health/readiness
+
+Custom HealthIndicator
+You get a lot for free: the moment a starter is on the classpath, Spring auto-registers an indicator. Your datasource gives you a db indicator; your Redis (Day 39) gives you a redis indicator — automatically folded into /actuator/health. For anything custom, you implement HealthIndicator (one method, return Health.up()/down() with details) and Spring picks up the bean.
+
+Don't blindly cascade readiness onto downstream health. It's tempting to add a BookServiceHealthIndicator to borrow-service that pings book-service and reports DOWN if book-service is down. Resist that for readiness. If you do it, book-service going down drags borrow-service's readiness DOWN → borrow-service gets pulled from rotation too → one service's outage cascades. But you already solved book-service being down the right way in Part 2: a circuit breaker with a fallback (Day 33). borrow-service can degrade gracefully; it should stay in rotation. So: readiness reflects this service's own ability to serve (its DB, its essential resources) — not the health of its whole dependency tree. Saying this out loud is a strong senior signal.
+
+By default Actuator exposes only /actuator/health over HTTP — everything else is hidden, deliberately. You opt-in:
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus   # explicit allow-list
+
+Never reflexively use include: "*" on a public service — that exposes /actuator/env (config, sometimes secrets), /actuator/heapdump, /actuator/threaddump, /actuator/beans. That's a config-and-internals leak. Also lock down health detail:
+
+management:
+  endpoint:
+    health:
+      show-details: when_authorized   # anonymous callers see only {"status":"UP"}, not your DB/Redis component details
+
+Security, adapted to your stack
+The Month-1 guide secured actuator with Spring Security roles. But your microservices don't run per-service Spring Security — your auth lives as a global filter on the api-gateway (8085). So the clean, architecture-fitting hardening is a separate management port
+
+management:
+  server:
+    port: 9001    # actuator moves off 8082 (app traffic) onto 9001 (ops traffic)
+
+Now /actuator/** is reachable only on 9001 — which you keep inside the Docker network (lms-net) and never route through the public gateway. Docker and Eureka (also inside the network) can hit it freely; the outside world can't. This is the exact same internal-vs-external listener idea you already used for Kafka's dual listener (INTERNAL://kafka:9092 vs EXTERNAL://localhost:29092) — same instinct, applied to ops endpoints. And it means you keep /actuator/health open (probes need no auth) without exposing the sensitive endpoints.
+
+by default Eureka marks you UP as long as heartbeats arrive — even if your DB is dead. Flip:
+eureka:
+  client:
+    healthcheck:
+      enabled: true   # Eureka's view of your status now follows Actuator health, not just the heartbeat
+
+Now if readiness goes DOWN, Eureka stops advertising you for lb:// routing — traffic is steered away automatically. (And remember your prefer-ip-address gotcha: a registered-but-unreachable instance is the opposite failure — registry says UP, calls 503. Health checks and a reachable address are the two halves of "actually serving.")
+Docker (Day 40): upgrade your Compose healthcheck from "is the port open" to "is the service ready":
+
+book-service:
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:9001/actuator/health/readiness"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+
+Now condition: service_healthy means truly ready to serve, not just process booted — so borrow-service doesn't start hammering a book-service that's still warming up.
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true        # exposes /health/liveness and /health/readiness (needed outside k8s)
+      group:
+        readiness:
+          include: readinessState, db, redis   # traffic-gating deps; note: NO downstream services
+      show-details: when_authorized
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  server:
+    port: 9001               # actuator on the internal-only ops port
+
+
+A tiny custom indicator (illustrative):
+
+@Component   // Spring auto-detects HealthIndicator beans and folds them into /actuator/health
+public class CatalogHealthIndicator implements HealthIndicator {
+    @Override
+    public Health health() {
+        boolean catalogReady = /* cheap local check, e.g. essential config loaded */;
+        return catalogReady
+            ? Health.up().withDetail("catalog", "loaded").build()   // contributes UP + a detail
+            : Health.down().withDetail("catalog", "not loaded").build();
+    }
+}
+
+
+"What's the difference between liveness and readiness, and why does it matter?"
+"They answer two different questions and trigger two different actions. Liveness is 'is my process still sane, or is it broken beyond recovery?' — if it's down, the orchestrator should restart the container. Readiness is 'can I accept traffic right now?' — if it's down, you stop routing to the instance but you don't restart it, because it may just be warming up or waiting on a dependency. The critical rule is that liveness must not depend on external systems. If I tie liveness to my database, a brief DB outage makes every replica fail its liveness probe, the orchestrator restarts them all, and I get a crash loop — I've turned a recoverable blip into a self-inflicted outage. Readiness, on the other hand, can include dependencies like the DB or Redis, because it's about whether I can serve. Spring Boot exposes both as health groups under /actuator/health. One nuance I'm careful about: I don't make readiness depend on downstream services — if book-service is down, I don't want borrow-service pulled from rotation, because it has a circuit breaker and can degrade gracefully. I also wire Eureka's health check to Actuator so an unhealthy instance is steered around automatically, and I point my Docker Compose health checks at the readiness probe so service_healthy means genuinely ready, not just booted. In production I move actuator to a separate management port on the internal network so the sensitive endpoints aren't publicly reachable."
+
+
+"Walk me through what happens to a borrow request when Kafka is down."
+"The borrow still succeeds — that's the whole reason the notification goes over Kafka. The core transaction is persisting the borrow and decrementing stock; the notification is a side effect, so I keep it off the critical path. The key is not to block the commit on the Kafka send — if you do a blocking get on the send future inside the transaction, a Kafka outage will fail your borrows, which defeats the decoupling. For guaranteed delivery I'd use a transactional outbox: write the event to an outbox table in the same DB transaction, and a relay publishes it to Kafka, so the event survives even if the broker's down at commit time. When Kafka comes back, my notification-service consumer rebalances and resumes from its last committed offset, so buffered events still get delivered at-least-once. Contrast that with book-service being down, which I don't absorb the same way — there the circuit breaker opens and I fail fast with a 503, because I can't confirm availability. And if my own database is down, I fail cleanly with a 503 and flip readiness to DOWN so traffic is steered away, but I keep liveness UP so I'm not restart-looped. The principle is knowing which failures to degrade through and which to surface — you can survive a dead cache or a missed notification, but you can't fake a write."
+
+
+It's a Library Management System split into six Spring Boot services. A request enters through an API gateway, which is the single public entry point and does auth and logging as global filters. The gateway resolves services through Eureka and load-balances with lb:// routing, so nothing is hard-coded to a host. Each service owns its own MySQL database — database-per-service. borrow-service is the orchestrator: it calls user-service and book-service over OpenFeign, wrapped in Resilience4j circuit breakers, then publishes a book-borrowed event to Kafka, which notification-service consumes. book-service caches reads in Redis with cache-aside. Everything's Dockerized with Compose, using health-check-based startup ordering.
+On a borrow: gateway → borrow-service → validate the user and check-and-decrement stock via Feign → persist the borrow → publish the event → notification-service sends the notification.
+Now the part I care about most — how it behaves when things break. Every service returns a consistent RFC 7807 error contract from a shared module, so errors look identical system-wide and carry a traceId for cross-service log correlation. When a downstream service errors, an ErrorDecoder preserves the real status instead of flattening it to a 500, and I separate business failures from infrastructure failures so a 404 doesn't trip the breaker. If book-service is down, the breaker opens and I fail fast with a clean 503 rather than exhausting borrow-service's threads waiting on timeouts. If Kafka is down, the borrow still succeeds because the notification is a decoupled side effect. If Redis is down, reads degrade to MySQL via a cache error handler. If a service's own database is down, it fails cleanly and flips its readiness probe to DOWN so Eureka steers traffic away — but keeps liveness UP so it isn't restart-looped. Every service exposes Actuator health, with liveness and readiness as separate probes, wired into both Eureka and the Docker health checks. The guiding principle is: degrade what you can, surface what you can't
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

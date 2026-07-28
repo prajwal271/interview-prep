@@ -1,0 +1,334 @@
+The Singleton pattern ensures a class has exactly one instance in the application, and gives you a single global point of access to it.
+Singleton Pattern means only one object can be created for a particular class , cannot create more than that.
+
+Part 1 — What Singleton is, and why it exists
+Ensure a class has only one instance, and provide a global point of access to it.
+
+-> Exactly one instance — no matter how many times, or from how many places, code tries to get this object, they all get the same single instance. You cannot accidentally end up with two.
+-> A global access point — there's one well-known way to reach that instance from anywhere, without passing it around by hand.
+
+Why does this pattern exist — what problem is it solving?
+It exists for objects where having more than one instance is either wasteful, incorrect, or dangerous. Three concrete flavors:
+-> Wasteful to duplicate. A database connection pool or a thread pool is expensive to build and holds real resources. If every part of your app created its own, you'd exhaust connections or memory. You want one pool that everyone shares.
+-> Incorrect to duplicate. A configuration manager that loads your app settings. If two instances existed, they could drift out of sync — one gets reloaded, the other doesn't — and now different parts of the app disagree about the config. There must be one source of truth.
+-> Coordination point. A logger, a cache, an ID generator, a device registry. These are shared services that everything talks to; a single shared instance is exactly the mental model you want.
+
+What Singleton is NOT
+It is not just "a class with static methods." A utility class full of static methods (like Math) has no instance at all — you never create an object. A Singleton does have exactly one real object; it just controls that there's only one. This distinction matters: a real instance can implement interfaces, hold state, and be passed as an object; a bag of statics can't.
+
+To enforce "only one," a Singleton has to do two things — make the constructor private so no outside code can call new on it, and then expose one static method (conventionally getInstance()) that hands back the single, internally-held instance. Private constructor slams the door on new; the static accessor is the one authorized way in. That's the whole trick, and every implementation you'll see today is a variation on making those two moves safely.
+
+"global point of access" is also Singleton's biggest liability
+
+Singleton is a creational pattern that ensures a class has exactly one instance and provides a global point of access to it. You use it for objects where more than one instance would be wasteful or incorrect — a connection pool, a configuration manager, a logger, a cache. It's enforced by making the constructor private so no other code can instantiate it, and exposing a static getInstance method that returns the single shared instance. 
+
+Part 2 — The naive implementation
+Version A — Eager initialization
+"Eager" means the instance is created the moment the class is loaded, up front, whether or not anyone ends up using it.
+
+public class ConfigManager {
+
+    // 1. The single instance, created eagerly when the class is loaded.
+    private static final ConfigManager INSTANCE = new ConfigManager();
+
+    // 2. Private constructor — slams the door on `new` from outside.
+    private ConfigManager() {
+        // load config, etc.
+    }
+
+    // 3. The one authorized way in.
+    public static ConfigManager getInstance() {
+        return INSTANCE;
+    }
+}
+
+the JVM guarantees that class initialization (running those static initializers) happens exactly once and is safely synchronized by the classloader itself.The one trade-off: the instance is created whether you use it or not.If ConfigManager is expensive to build (reads files, opens connections) and some runs never touch it, you paid that cost for nothing.
+
+Version B — Lazy initialization (the naive, and broken, version)
+"Lazy" means: don't build the instance until someone actually asks for it the first time.
+
+public class ConfigManager {
+
+    // 1. Not created yet — starts as null.
+    private static ConfigManager instance;
+
+    // 2. Private constructor, same as before.
+    private ConfigManager() {
+        // expensive setup...
+    }
+
+    // 3. Create on first request, reuse thereafter.
+    public static ConfigManager getInstance() {
+        if (instance == null) {          // check: does it exist yet?
+            instance = new ConfigManager();  // if not, build it now
+        }
+        return instance;                 // hand back the (now existing) instance
+    }
+}
+
+Line 1 — note two changes from eager: no final (we assign it later, not at declaration), and no new yet. It starts as null.
+Line 3 — the lazy logic. The first caller finds instance == null, so it enters the if and creates the object. Every caller after that finds instance already set, skips the if, and returns the existing one. The instance is born on first use — that's the laziness.
+
+That check-then-create is two separate steps, not one atomic action. In a multithreaded program, a thread can be paused right between them. Picture two threads calling getInstance() at nearly the same time, on a fresh (still-null) instance:
+
+Thread A runs if (instance == null) → it's null → true. Thread A steps into the if, about to construct... and the CPU pauses it right there, before line 2 runs.
+Thread B now runs if (instance == null) → it's still null (A hasn't created it yet) → true. Thread B constructs its own ConfigManager and returns it.
+Thread A wakes up, finishes its new ConfigManager(), and returns a different object.
+
+This isn't hypothetical — it's a genuine race condition, and it's precisely the failure your concurrent execution engine and mobile-farm code live in the middle of. Any time a lazy Singleton is touched by multiple threads, this naive version is unsafe.
+
+The simplest Singleton is eager initialization — a private static final instance created at class load, with a private constructor and a static getInstance. It's thread-safe for free because the JVM guarantees class initialization runs once, synchronized by the classloader. The only cost is the instance is built whether or not it's used. If you want lazy creation, the naive version does a null-check then creates — but that check-then-create isn't atomic, so under concurrency two threads can both see null and create two instances, breaking the single-instance guarantee. Fixing that race is what the thread-safe implementations address
+
+Fix 1 — Synchronize the whole method
+
+public class ConfigManager {
+    private static ConfigManager instance;
+
+    private ConfigManager() { }
+
+    public static synchronized ConfigManager getInstance() {  // note: synchronized
+        if (instance == null) {
+            instance = new ConfigManager();
+        }
+        return instance;
+    }
+}
+
+What changed is one keyword: synchronized on the method. That makes any calling thread acquire a lock (the monitor on the ConfigManager.class object) before it can enter, and release it on exit. Because only one thread can hold that lock at a time, the check-then-create now runs as an uninterruptible unit — Thread B literally cannot enter the method while Thread A is inside it. The race from Part 2 is gone.
+
+The trade-off — and it's a real one. The lock is acquired on every single call, forever. But think about the actual usage pattern: the instance gets created once, on the very first call. Every call after that — potentially millions — just needs to read an already-set field and return it. Yet all of them still pay to acquire and release the lock. You've made 99.99% of calls (pure reads that need no protection) serialize behind a lock they don't need. 
+
+Fix 2 — Double-checked locking (with volatile)
+
+public class ConfigManager {
+    private static volatile ConfigManager instance;   // volatile is essential — see below
+
+    private ConfigManager() { }
+
+    public static ConfigManager getInstance() {
+        if (instance == null) {                       // 1st check — NO lock (fast path)
+            synchronized (ConfigManager.class) {      // lock only if it looks null
+                if (instance == null) {               // 2nd check — WITH lock
+                    instance = new ConfigManager();
+                }
+            }
+        }
+        return instance;
+    }
+}
+
+The first check, outside the lock. Once the instance exists, every future caller hits if (instance == null), finds it's not null, skips the entire synchronized block, and returns immediately — no locking at all on the common path. This is what fixes Fix 1's performance problem: we only reach for the lock while the instance is still null, which is a brief window at startup.
+
+The second check, inside the lock. Why check twice? Because between a thread passing the first check and actually acquiring the lock, another thread might have already created the instance. So once a thread finally gets the lock, it must look again — "is it still null?" — before creating. Without this second check, two threads that both passed the first null-check would both construct. The two checks guard two different windows.
+
+The line instance = new ConfigManager() looks atomic but is really three sub-steps under the hood
+	(a) allocate memory for the object,
+	(b) run the constructor to initialize it,
+	(c) point instance at that memory.
+
+The JVM and CPU are permitted to reorder (b) and (c) — to publish the reference before the constructor has finished
+
+If that reordering happens, another thread running the first null-check could see instance != null (step c done) and return an object whose constructor hasn't finished running (step b not done) — a partially constructed object, with fields still at their defaults. It would use a half-built singleton and corrupt in bizarre, unreproducible ways.
+Marking the field volatile forbids that reordering and guarantees that when a thread sees a non-null instance, everything the constructor wrote is fully visible to it. (Historical note worth mentioning in an interview: before Java 5, the memory model was too weak for volatile to even fix this, so double-checked locking was flat-out broken. Java 5's revised memory model is what made this idiom correct.)
+
+The trade-off: correct and fast, but verbose and easy to get subtly wrong — forget volatile, or forget the second check, and it's broken in a way that passes every test on your laptop and only fails in production under load. Because of that fragility, most modern Java developers prefer the next approach for lazy singletons.
+
+volatile exists to solve one specific problem: visibility of changes across threads. It's easy to assume that when one thread writes to a variable, other threads immediately see the new value. In a multithreaded program, that assumption is false — and volatile is how you make it true for a given variable.
+
+Fix 3 — Bill Pugh (the initialization-on-demand holder idiom)
+This one is elegant: it gets you lazy and thread-safe with zero synchronization and zero volatile, by cleverly leaning on the JVM's class-loading guarantee — the same free thread-safety that made eager init safe 
+
+
+public class ConfigManager {
+
+    private ConfigManager() { }
+
+    // A private static inner class that holds the instance.
+    private static class Holder {
+        private static final ConfigManager INSTANCE = new ConfigManager();
+    }
+
+    public static ConfigManager getInstance() {
+        return Holder.INSTANCE;   // triggers Holder loading on first call only
+    }
+}
+
+The trick is when the inner Holder class gets initialized. A key JVM rule: a class is not loaded and initialized until it's first actively referenced. The Holder class is referenced in exactly one place — inside getInstance(). So:
+
+-> When ConfigManager itself loads, Holder does not load yet (nested classes load independently). No instance exists — it's genuinely lazy.
+-> The first time anyone calls getInstance(), the JVM sees Holder.INSTANCE, loads Holder, and runs its static initializer — creating the one ConfigManager. That's the moment of creation, on first use.
+-> Thread safety comes for free: the JVM guarantees class initialization runs exactly once and is internally synchronized (Part 2's guarantee). Fifty threads calling getInstance() simultaneously all trigger the same one-time Holder initialization; the classloader serializes it. No lock we wrote, no volatile, no double-check — the JVM handles it.
+
+The trade-off: almost none for typical use — this is the recommended idiom for a lazily-initialized singleton. It's lazy, thread-safe, fast (no locking on any call), and clean. Its only gap is that, like Fixes 1–3, it can still be broken by reflection or serialization — which is exactly what the next approach closes, and the subject of the next part.
+
+
+Fix 4 — The enum singleton
+
+public enum ConfigManager {
+    INSTANCE;
+
+    public void load() {
+        // real work here
+    }
+}
+
+ConfigManager.INSTANCE.load();
+
+Why an enum? Because the JVM already gives enum constants three guarantees you'd otherwise fight for:
+-Single instance, guaranteed by the language. 
+-Serialization-safe for free. The other four implementations can be broken by serialization: serialize the singleton, deserialize it, and you get a second object. Enums serialize specially — deserialization always returns the same INSTANCE, never a new one. No extra code needed.
+-Reflection-safe for free. Reflection can normally reach a private constructor and forcibly create a second instance. The JVM explicitly forbids reflective instantiation of enums — Constructor.newInstance() throws for them. That attack simply doesn't work.
+
+The trade-offs: it's eager — INSTANCE is created when the enum type loads, so you can't lazily defer an expensive one.
+
+The naive lazy singleton isn't thread-safe because check-then-create isn't atomic. The simplest fix is synchronizing getInstance, but that locks on every call including reads, so it's a bottleneck. Double-checked locking fixes the performance by checking null without a lock first and only synchronizing to create — but the instance field must be volatile, otherwise instruction reordering can publish a reference to a partially constructed object. The cleanest lazy approach is the Bill Pugh idiom: a private static holder class whose static initializer creates the instance, so it's created lazily on first access and made thread-safe by the JVM's one-time class-initialization guarantee, with no locking. And the most robust is Joshua Bloch's enum singleton, which is thread-safe and also immune to serialization and reflection attacks for free — its trade-offs are that it's eager and can't extend a class. In practice I use eager static-final for cheap objects, Bill Pugh for lazy ones, and enum when I need serialization or reflection safety.
+
+"I can write a Singleton" from "I understand why the enum version is considered the safest." We built four thread-safe implementations in Part 3, but three of them (eager, Bill Pugh, double-checked locking) share a quiet weakness: their single-instance guarantee can be defeated from the outside by three mechanisms
+
+Threat 1 — Reflection
+
+public class ConfigManager implements Serializable {
+    private ConfigManager() { }
+
+    private static class Holder {
+        private static final ConfigManager INSTANCE = new ConfigManager();
+    }
+
+    public static ConfigManager getInstance() {
+        return Holder.INSTANCE;
+    }
+}
+
+ConfigManager one = ConfigManager.getInstance();   // the legit singleton
+Constructor<ConfigManager> c = ConfigManager.class.getDeclaredConstructor();
+c.setAccessible(true);                 // force the private constructor open
+ConfigManager two = c.newInstance();   // build a SECOND instance directly
+System.out.println(one == two);        // false — two different objects!
+
+The defense — make the constructor refuse to run twice:
+
+private ConfigManager() {
+    if (Holder.INSTANCE != null) {   // if the one instance already exists...
+        throw new IllegalStateException("Use getInstance() — singleton already created");
+    }
+}
+
+
+Threat 2 — Serialization
+If your singleton implements Serializable (common — you might persist or send it across a network), deserialization is itself a construction mechanism that bypasses your constructor. Java rebuilds the object from bytes, creating a fresh instance every time you deserialize.
+
+
+ConfigManager one = ConfigManager.getInstance();
+
+// Serialize it to bytes, then read it back:
+ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+new ObjectOutputStream(bytes).writeObject(one);
+
+ObjectInputStream in = new ObjectInputStream(
+        new ByteArrayInputStream(bytes.toByteArray()));
+ConfigManager two = (ConfigManager) in.readObject();   // fresh instance from bytes
+
+System.out.println(one == two);   // false — deserialization made a new one!
+
+Fresh instance is the same copy of the previous but not the same instance
+
+Threat 3 — Cloning
+If your singleton implements Cloneable (or inherits a clone() that works), Object.clone() produces a copy without ever touching your constructor — another duplication route.
+
+Why enum shrugs off all three — for free
+Reflection-proof: the JVM explicitly forbids reflective instantiation of enum types — Constructor.newInstance() throws IllegalArgumentException("Cannot reflectively create enum objects"). The Threat 1 attack simply cannot run. No guard needed.
+Serialization-proof: enums have a special serialized form — only the name is written, and on read the JVM resolves it back to the existing constant via Enum.valueOf. Deserialization always returns the same INSTANCE. No readResolve() needed.
+Clone-proof: Enum.clone() is final and throws CloneNotSupportedException — you can't even write a cloneable enum. No override needed.
+
+Even a thread-safe singleton can be broken three ways. Reflection can call setAccessible(true) on the private constructor and create a second instance — you defend by throwing from the constructor if the instance already exists. Serialization creates a new instance on deserialization — you defend with a readResolve method that returns getInstance(), so the deserialized copy is discarded. And if the class is Cloneable, clone() copies it — you defend by overriding clone to throw, or simply not implementing Cloneable. The enum singleton is immune to all three for free: the JVM forbids reflective enum creation, enums deserialize back to the same constant, and Enum.clone is final and throws. That's why enum is considered the most robust implementation — you get airtight single-ness without writing any defensive code.
+
+Part 7 — Singleton in the real world: Spring beans
+The starting fact: in Spring, beans are singleton-scoped by default. Every time you write @Service, @Repository, @Component, or @Bean without specifying a scope, Spring creates exactly one instance of that class and hands the same instance to everyone who needs it.
+
+When ten other beans @Autowired a ConfigService, all ten receive the same object. Spring built it once, cached it in the container, and injects that one shared reference everywhere. You get the "one shared instance" benefit of Singleton — without writing a private constructor, a getInstance(), or any thread-safety code. The container does it for you.
+
+You can make it explicit (though it's the default):
+@Service
+@Scope("singleton")   // this is what you get even if you omit it
+public class ConfigService { }
+
+In Spring, beans are singleton-scoped by default — the container creates one instance and injects that same instance everywhere it's needed. But Spring's singleton isn't the GoF singleton: GoF guarantees one instance per classloader and the class enforces it with a private constructor, whereas Spring guarantees one instance per ApplicationContext and the container enforces it — the bean itself is an ordinary class with a public constructor. So two Spring contexts in one JVM give two 'singleton' instances. The practical advantage is that because the bean is a normal class, Spring injects it through the constructor instead of a global getInstance, which fixes the GoF singleton's biggest weakness — the hidden global dependency — and keeps it testable and DIP-friendly. The main caveat is that singleton beans are shared across all threads, so they must be stateless or thread-safe.
+
+A Singleton is one instance per classloader, not per JVM.
+
+To see why, we have to recall what actually holds the instance. In Part 2, the field was private static ConfigManager instance. The single-ness of a Singleton rests entirely on the single-ness of that static field. So the real question becomes: how many copies of that static field can exist? And the answer is: one per classloader that loads the class.
+Why. A class in Java isn't uniquely identified by its name alone. Its true identity is the pair (fully-qualified class name + the classloader that loaded it). So com.simplifyqa.ConfigManager loaded by classloader A and the same com.simplifyqa.ConfigManager loaded by classloader B are, to the JVM, two different classes. Different classes → separate copies of the static fields → separate instance fields → two singletons living in one JVM.
+
+People say a Singleton is one instance per JVM, but precisely it's one per classloader. A class's identity is its fully-qualified name plus the classloader that loaded it, so the same class loaded by two different classloaders is two distinct classes with separate static fields — and since the singleton lives in a static field, that's two independent instances in one JVM. This matters in plugin architectures and app servers: if you load a class in isolated classloaders, each gets its own singleton. In my own work with URLClassLoader-based plugin isolation, that's exactly what enables isolation and hot reload — reloading a plugin means a new classloader with a fresh static instance, so I get a genuinely new singleton rather than a stale one. It's also the source of classic classloader-leak bugs, where a parent-loaded singleton pins a child classloader and prevents redeploy
+
+When NOT to use Singleton
+
+1. It's global state in disguise : A Singleton is a globally accessible, mutable object — and global mutable state is one of the oldest known sources of bugs in software. Because anything, anywhere can call getInstance() and modify it, you lose the ability to reason about who changed what.
+2. It hides dependencies 
+3. It makes testing hard
+4. It violates the Single Responsibility Principle  (1) its real job — managing config, logging, whatever — and (2) managing its own lifecycle and enforcing its own single-ness. 
+
+Singleton is a creational pattern that ensures a class has exactly one instance and gives a global point of access to it. You enforce it with a private constructor — so no outside code can call new — and a static getInstance() that returns the single shared instance. It's used for things there should only be one of: a config manager, connection pool, logger, or cache. The catch is that the naive lazy version isn't thread-safe, and even a thread-safe one can be broken by reflection and serialization — so in practice I use the Bill Pugh holder idiom or an enum, and inside Spring I don't hand-roll it at all, I use singleton-scoped beans
+
+"Why is enum the best singleton?" → (Parts 3 & 6) It's thread-safe and single by language guarantee, and it's the only version immune — for free — to the three duplication attacks: reflection (JVM forbids reflective enum creation), serialization (enums resolve back to the same constant), and cloning (Enum.clone is final and throws). Trade-offs: it's eager and can't extend a class.
+
+SERIALIZATION
+
+A Java object lives in the JVM's heap memory as a graph of references. Your Profile object holds a reference to a String name, maybe a List<Address>, each Address pointing to more objects. These are memory addresses — pointers into this running JVM's heap. They're meaningless the instant the JVM shuts down, and meaningless to any other JVM.
+
+Now suppose you want that object to exist somewhere that isn't this JVM's live memory:
+
+written to a file on disk, to reload tomorrow
+stored in a database or a cache like Redis
+sent to another JVM on another machine
+
+All three have the same problem: the destination is just a stream of bytes. A file is bytes. A network socket is bytes. A cache value is bytes. None of them understand "a Profile object with a pointer to a String at heap address 0x7f3a...".
+Serialization is the translation: object graph → flat sequence of bytes. Deserialization is the reverse: bytes → reconstructed object graph in some JVM's heap. Serializable is the marker that tells Java "you have my permission to do this translation on this class."
+
+public class Profile implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String name;
+    private boolean active;
+    // constructor, getters
+}
+
+Write to disk (destination = file, but the mechanism is identical for a socket):
+
+try (ObjectOutputStream out =
+         new ObjectOutputStream(new FileOutputStream("profile.ser"))) {
+    out.writeObject(profile);        // object graph -> bytes -> file
+}
+
+Read it back, possibly in a completely different run of the program:
+
+try (ObjectInputStream in =
+         new ObjectInputStream(new FileInputStream("profile.ser"))) {
+    Profile p = (Profile) in.readObject();   // bytes -> new object graph
+}
+
+
+Note 
+private transient String password;   // never written to bytes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

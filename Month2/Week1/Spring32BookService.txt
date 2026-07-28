@@ -1,0 +1,249 @@
+@NotBlank is for Strings only (checks not-empty-or-whitespace). totalCopies is an Integer, so we use @NotNull (just checks it's not null). Using @NotBlank on an Integer wouldn't even compile correctly. Match the validation annotation to the field type.
+
+Part 2: Inter-Service Communication
+
+You now have two microservices running:
+	user-service (port 8081) — owns the users database
+	book-service (port 8082) — owns the books database
+Tomorrow you'll build borrow-service. When a member wants to borrow a book, borrow-service needs to answer these questions:
+"Does this user actually exist?" → only user-service knows (it owns the users data)
+"Is this book available to borrow?" → only book-service knows (it owns the books data)
+"Reduce the available count of this book by 1" → only book-service can do this
+
+The Answer: Services Talk Over HTTP
+The solution: borrow-service makes an HTTP request to book-service — exactly like Postman or your browser does.When you tested book-service in Postman, you sent: GET http://localhost:8082/api/books/1 
+And book-service replied with the book's JSON.
+borrow-service can do the EXACT same thing. It can send an HTTP request to http://localhost:8082/api/books/1 and get back the book data. The fact that the caller is another program (instead of Postman) makes no difference — book-service just sees an HTTP request and responds.
+
+One service becomes a CLIENT of another. borrow-service is the client; book-service is the server (in this interaction). This is called inter-service communication — services communicating with each other.
+This is the fundamental mechanism of microservices. Since they can't share databases, they share information by talking over the network.
+
+There are two fundamentally different ways services can talk. Understanding the difference is crucial.
+Style 1: Synchronous — "Wait for the answer"
+The caller sends a request and WAITS for the response before doing anything else.
+When you use synchronous: When you NEED the answer to continue. borrow-service literally cannot decide whether to allow the borrow until it knows whether the book is available. So it must wait.
+Tools for synchronous: RestTemplate, WebClient, OpenFeign (the one we'll use).
+
+Style 2: Asynchronous — "Fire and forget"
+The caller sends a message and immediately continues without waiting. Someone else handles the message later.
+Analogy: a text message. You send a text and immediately get on with your life. You don't sit and stare at your phone waiting for a reply. The recipient reads and acts on it whenever they get to it.
+
+borrow-service:  publishes a "book was borrowed" message → (into a message queue)
+borrow-service:  [immediately continues — borrow is done]
+...some time later...
+notification-service: reads the message → sends a confirmation email
+
+we do SYNCHRONOUS communication. Asynchronous (Kafka) 
+
+Spring gives you three ways to make one service call another over HTTP. Let me show all three doing the SAME thing — fetching a book — so you see why OpenFeign is the cleanest.
+
+Tool 1: RestTemplate (the old way)
+RestTemplate restTemplate = new RestTemplate();
+String url = "http://localhost:8082/api/books/" + bookId;
+BookResponse book = restTemplate.getForObject(url, BookResponse.class);
+
+You manually build the URL string (concatenating bookId), then call the method.
+Downsides: You build URLs by hand (easy to make typos like a missing /). It's verbose. The host and port (localhost:8082) get scattered through your code. And Spring has put RestTemplate in "maintenance mode" — it still works, but it's the legacy approach. You'll see it in old tutorials, so recognize it, but don't use it for new code.
+
+Tool 2: WebClient (the reactive way)
+WebClient webClient = WebClient.create();
+BookResponse book = webClient.get()
+    .uri("http://localhost:8082/api/books/" + bookId)
+    .retrieve()
+    .bodyToMono(BookResponse.class)
+    .block();
+
+This is the modern replacement for RestTemplate, built for "reactive" (non-blocking) programming.
+Downsides: The reactive style (Mono, .block(), etc.) is a whole programming model with a learning curve. It's powerful and great for reactive apps, but it's overkill when you just want a simple "call this service and give me the result." More machinery than we need today.
+
+Tool 3: OpenFeign (the declarative way) — OUR CHOICE
+With OpenFeign, you don't write the calling code at all. You just describe the remote API as a Java interface, and Spring writes the implementation for you behind the scenes.
+
+@FeignClient(name = "book-service", url = "http://localhost:8082")
+public interface BookClient {
+
+    @GetMapping("/api/books/{id}")
+    BookResponse getBookById(@PathVariable Long id);
+}
+Then you call it like an ordinary Java method:
+
+BookResponse book = bookClient.getBookById(5L);
+
+Why OpenFeign wins
+
+Declarative — you say WHAT you want (an interface describing the API), not HOW to do it (no URL building, no JSON parsing).
+Reads like local code — bookClient.getBookById(5L) is clean and natural.
+Minimal code — just an interface with annotations. No implementation to write or maintain.
+Familiar annotations — @GetMapping, @PathVariable are the SAME annotations you already use in your controllers. Nothing new to learn there.
+Scales to production — later, instead of hardcoding localhost:8082, you can use just the service name book-service and let a discovery server (Eureka) find the real address. Very powerful for real deployments.
+
+The Danger — Cascade Failures
+Imagine borrow-service calls book-service, but book-service is down (crashed, or restarting, or overwhelmed with traffic).
+What happens without protection?
+
+1. borrow-service sends request to book-service
+2. No response... borrow-service waits...
+3. It keeps waiting — maybe 30 seconds (the default timeout)
+4. Meanwhile, more borrow requests arrive — each ALSO waits 30 seconds
+5. All of borrow-service's worker threads get stuck waiting
+6. borrow-service has no free threads → can't handle ANY new requests
+7. borrow-service effectively goes DOWN too
+8. Now TWO services are broken instead of one
+
+
+This is a cascade failure — one service's failure spreads to the services that depend on it, like falling dominoes. In a large system with many interconnected services, a single failure can bring down the entire platform.
+The fix: the Circuit Breaker pattern (Part 4, using a library called Resilience4j). It works like an electrical circuit breaker in your house — when it detects that book-service is failing repeatedly, it "trips" and immediately returns a fallback response instead of waiting 30 seconds. This protects borrow-service's threads and gives book-service time to recover. We'll implement and test this today.
+
+@FeignClient(name = "book-service", url = "http://localhost:8082")
+public interface BookClient {
+
+    @GetMapping("/api/books/{id}")
+    BookDto getBookById(@PathVariable("id") Long id);
+}
+
+When Spring sees @FeignClient, it generates a real implementation of this interface at startup — a class that makes actual HTTP calls. You never write that class.
+public interface BookClient — Notice it's an INTERFACE, not a class. There's no implementation, no method bodies. OpenFeign generates the implementation. Just like Spring Data JPA generated your repository implementation — same magic, different tool.
+
+Note on @PathVariable("id") — I explicitly wrote the name "id" in the annotation. In Feign clients, it's best practice to always specify the path variable name explicitly (unlike controllers where it can sometimes be inferred). This avoids "method has too many parameters" or name-mismatch errors.
+
+server:
+  port: 8082
+
+spring:
+  application:
+    name: book-service
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/book_service_db
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQLDialect
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+logging:
+  level:
+    root: INFO
+    com.library: DEBUG
+    org.hibernate.SQL: DEBUG
+
+server: — Opens the "server" configuration group. Everything indented under it configures the embedded Tomcat web server.port: 8082 — Tells the embedded Tomcat to listen on port 8082. This is the port other programs (Postman, browsers, other services) use to reach book-service
+spring: — Opens the big "spring" configuration group. Most Spring Boot settings live under here (datasource, jpa, flyway, etc.).
+application: — Sub-group for application-level settings.
+name: book-service — Gives this application an internal logical name: "book-service". Where is this used?
+datasource: — Opens the database-connection configuration group (still under spring:).
+url: jdbc:mysql://localhost:3306/book_service_db — The full address of the database. Breaking it down:
+
+JPA Block
+This block configures JPA (and Hibernate, which is the JPA implementation doing the actual ORM work).
+jpa: — Opens the JPA configuration group.
+hibernate: — Sub-group for Hibernate-specific behavior.
+ddl-auto: validate — THIS IS IMPORTANT. "DDL" means Data Definition Language (CREATE TABLE, ALTER TABLE, etc.). This setting controls what Hibernate does to your database SCHEMA at startup. Options:
+
+none — Hibernate does nothing to the schema
+validate — Hibernate CHECKS that your entity classes match the existing tables, but does NOT change anything. If the Book entity doesn't match the books table, startup FAILS with an error.
+update — Hibernate tries to modify tables to match entities (adds missing columns, etc.)
+create — Hibernate DROPS and re-creates all tables on every startup (you lose all data!)
+create-drop — same as create, but also drops tables when the app shuts down
+
+Why validate? Because Flyway creates and manages your tables (via the V1__create_books_table.sql migration), NOT Hibernate. So we tell Hibernate "don't touch the schema — just verify it matches my entities." This is the professional setup: Flyway owns schema changes (version-controlled, repeatable), Hibernate just validates. If you used update, you'd have TWO things trying to manage the schema, which causes conflicts
+
+show-sql: true — Prints the SQL statements Hibernate generates to the console
+properties: — A sub-group for passing lower-level properties directly to Hibernate.
+format_sql: true — Makes the printed SQL nicely formatted (indented, multi-line) instead of one long ugly line. Only matters if show-sql is true.
+dialect: org.hibernate.dialect.MySQLDialect — Tells Hibernate which "dialect" of SQL to generate. Different databases have slightly different SQL syntax
+
+flyway: — Opens the Flyway configuration group.
+enabled: true — Turns Flyway ON. At startup, Flyway will look in src/main/resources/db/migration/, find your migration scripts (like V1__create_books_table.sql), and run any that haven't been applied yet. If false, Flyway is disabled and won't create tables (then ddl-auto: validate would fail because the tables wouldn't exist).
+
+baseline-on-migrate: true — Handles the case where Flyway runs against a database that ALREADY has tables/data but no Flyway history. Without this, Flyway might refuse to run on a non-empty database. With true, Flyway "baselines" (marks the current state as a starting point) and proceeds. It's a safety setting that prevents startup errors in certain scenarios. For a fresh database it doesn't do much, but it avoids problems if the database isn't pristine.
+
+
+What is a Circuit Breaker? 
+The name comes from electrical circuit breakers in your house. When there's an electrical fault, the breaker "trips" — it cuts the circuit to prevent a fire. Once things are safe, you reset it.
+A software Circuit Breaker does the same for service calls. It monitors calls to book-service. If too many fail, it "trips" — and instead of letting more calls hang and fail, it IMMEDIATELY returns a fallback response. This:
+
+Protects user-service's threads (no more hanging)
+Gives book-service time to recover (stops hammering it)
+Returns a graceful response to the user instead of an ugly error
+
+
+A circuit breaker has three states
+1. CLOSED (normal — traffic flows)
+	Calls pass through normally to book-service.
+	The breaker counts failures.
+	If failures stay low → stays CLOSED.
+	If failures exceed a threshold (say 50% of recent calls) → trips to OPEN.
+2. OPEN (tripped — traffic blocked)
+	book-service is considered "broken."
+	Calls do NOT go through. They IMMEDIATELY return the fallback.
+	No waiting, no hanging — instant fallback response.
+	After a wait period (say 10 seconds) → moves to HALF-OPEN to test.
+3. HALF-OPEN (testing — cautious traffic)
+	Lets a FEW test calls through to book-service.
+	If they succeed → book-service recovered → back to CLOSED.
+	If they fail → book-service still broken → back to OPEN (wait again).
+
+
+@CircuitBreaker(name = "bookService", fallbackMethod = "checkBookFallback")
+public BookDto checkBookDetails(Long bookId) {
+    return bookClient.getBookById(bookId);
+}
+
+// Fallback: called when book-service is down or the circuit is OPEN
+public BookDto checkBookFallback(Long bookId, Throwable t) {
+    BookDto fallback = new BookDto();
+    fallback.setId(bookId);
+    fallback.setTitle("Book information temporarily unavailable");
+    fallback.setAuthor("Unknown");
+    fallback.setIsbn("N/A");
+    fallback.setTotalCopies(0);
+    fallback.setAvailableCopies(0);
+    fallback.setAvailable(false);
+    return fallback;
+}
+
+
+@CircuitBreaker(name = "bookService", fallbackMethod = "checkBookFallback"):
+name = "bookService" — links to the config in application.yml (the bookService instance you defined)
+fallbackMethod = "checkBookFallback" — the method to call instead, when the circuit is OPEN or the call fails
+
+When checkBookDetails is called, Resilience4j wraps it. If book-service responds normally → you get the real data. If book-service fails (or the circuit is OPEN) → Resilience4j calls checkBookFallback instead, instantly.
+
+The fallback method signature — CRITICAL rule: the fallback method MUST have:
+The SAME return type (BookDto)
+The SAME parameters as the original (Long bookId)
+PLUS a Throwable parameter at the end (the exception that triggered the fallback)
+
+If the signature doesn't match this pattern, Resilience4j won't find the fallback and you'll get an error.
+What the fallback returns: Instead of crashing, it returns a "graceful degradation" response — a placeholder BookDto saying "info temporarily unavailable" with available: false. The user gets a sensible response instead of an ugly error or a 30-second hang.
+
+
+What is the Circuit Breaker pattern?
+It prevents cascade failures when a downstream service is unavailable. It has three states: CLOSED (calls pass through normally), OPEN (after a failure threshold, calls fail fast and return a fallback instead of hanging), and HALF-OPEN (after a wait period, a few test calls check if the service recovered). If they succeed, it closes; if they fail, it reopens. In Spring Boot I use Resilience4j with the @CircuitBreaker annotation and a fallback method. Without it, one slow or down service can exhaust the caller's threads and cascade failures across the system
+
+What's a fallback method?
+It's the method Resilience4j calls instead of the original when the circuit is open or a call fails. It must have the same return type and parameters as the original, plus a Throwable parameter. It provides graceful degradation — returning cached data, a default value, or a friendly 'temporarily unavailable' response — instead of propagating an error to the user.
+
+Difference between Circuit Breaker and Retry?
+Retry attempts a failed call again, assuming the failure is transient (a brief network blip). Circuit Breaker STOPS calling a service that's consistently failing, to protect both the caller and give the failing service time to recover. They're complementary — you often retry a few times, and if failures persist, the circuit breaker trips. Resilience4j supports both.
+
+
+
+
+
+
+
+
+

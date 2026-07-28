@@ -1,0 +1,110 @@
+Think about your current setup. To run your library system you need:
+
+Java 17 (Corretto, specific version)
+MySQL 8.0.45 running on port 3306 with root/root
+Kafka 4.3 in KRaft mode at C:\kafka with that hand-edited kafka-server-start.bat
+4 Spring Boot services started in a specific order
+That long-path fix you applied
+The wmic workaround for Windows 11 24H2
+
+Now imagine you onboard a teammate tomorrow. You'd hand them a 5-page setup doc. They'd hit different errors than you did (different Windows version, different Java install path, MySQL already on a different port). It would take them two days to replicate your machine.
+This is called "works on my machine" — and it's the single biggest reason production deployments fail. Your dev laptop, your QA server, and the production cloud server all have subtly different OS versions, library versions, file paths, environment variables.
+Docker fixes this by packaging your application with everything it needs to run into a single, portable unit called an image. That image runs identically on Windows, Mac, Linux, AWS, your laptop, the production server — anywhere Docker is installed.
+
+A Virtual Machine (VM) virtualizes hardware. When you run a VM, you're running a full guest operating system on top of your host OS. So if your host is Windows and you run an Ubuntu VM, that VM has:
+Its own full Linux kernel
+Its own complete filesystem
+Its own memory and CPU allocation
+An entire OS booting up
+A typical VM = 2-20 GB on disk, boots in 30-60 seconds, uses 1-4 GB RAM minimum.
+
+
+A container virtualizes the operating system, not the hardware. It uses the host OS's kernel directly but isolates the process from everything else using Linux kernel features (namespaces and cgroups, if you're curious — interview-worthy terms). The container has:
+Its own filesystem view (but no kernel of its own)
+Its own network stack
+Its own process list
+Limits on CPU/memory
+A typical container = 50-500 MB on disk, starts in 1-2 seconds, uses 50-500 MB RAM.
+
+Three terms you need to know cold
+
+Image — A blueprint. A read-only template containing your application + all its dependencies (Java runtime, libraries, configuration, code). Class
+Container — A running instance of an image. You can run 10 containers from the same image. Think of it as an object instantiated from a class.
+Dockerfile — A text file with instructions to build an image. Think of it as the source code that compiles into the image.
+
+Docker is a containerization platform that packages applications with all their dependencies into portable units called containers. Unlike VMs which virtualize hardware and need their own OS kernel, containers share the host OS kernel and isolate processes using Linux kernel features like namespaces and cgroups. This makes them much lighter — a container starts in seconds and uses MBs of memory, versus a VM that takes minutes and GBs. The main value is consistency: a container that runs on my laptop runs identically in production, eliminating the 'works on my machine' problem
+
+How data is stored if the entire backend is running in cloud containers,
+There will be an instance for database also in docker 
+
+Amazon RDS ---> relational database system / cloud container for databases it does not store data instead it writes the data to the actual rds via network which will be present somewhere
+The RDS instance is a virtual server. When you create an RDS database, AWS spins up an EC2 virtual machine running an operating system plus your database engine (MySQL/Postgres). This is the "compute" — the thing doing the work.
+The database writes to what looks like a local disk. The OS presents the engine with a block device — something like /dev/xvdf that behaves exactly like a locally attached SSD. The engine issues completely normal disk operations ("write these bytes to this location"). It has no idea anything unusual is happening. This is the key abstraction.
+
+But that "disk" is actually Amazon EBS, reached over the network. The block device isn't a physical drive bolted into the server. It's an EBS (Elastic Block Store) volume living on a separate fleet of storage servers. Every read and write is transparently packaged up and sent over AWS's high-speed internal network to the EBS service, then the result comes back — fast enough (sub-millisecond within a data center) that the OS can't tell it isn't local. This network hop is the answer to your question: the connection from RDS to storage is a network connection to a block-storage service, dressed up to look like a local disk.
+
+
+Step 1: Create a Docker network
+docker network create library-net
+a1ab40105cb93abd6459a0c28ba1bcd5a82db4e1a1fd61fa8c79f2d3e6756532
+
+docker network ls
+
+Step 2: run MySQL server attached to that network
+docker run -d ^
+  --name mysql ^
+  --network library-net ^
+  -e MYSQL_ROOT_PASSWORD=root ^
+  -e MYSQL_DATABASE=user_service_db ^
+  -p 3307:3306 ^
+  -v mysql-data:/var/lib/mysql ^
+  mysql:8.0
+
+Step 3: Create the other databases inside the container
+docker exec -it mysql mysql -uroot -proot 
+	This command is used to exec into the container and run commands
+
+exec means step into and run something without stopping
+-it is actually 2 flags combined
+	-i --interactive --> keeps the input stream (STDIN) open, so you can type into the command.
+	-t --tty --> allocates a pseudo-terminal, giving you a proper interactive terminal: a prompt, line editing, formatted output, etc.
+
+Together, -it means "give me a live interactive terminal session inside this container." You almost always use them as a pair when you want to drop into a shell or an interactive tool.
+
+# Open a shell inside the container
+docker exec -it mysql bash
+
+# Or go straight into the MySQL client
+docker exec -it mysql mysql -u root -p
+
+Add a Docker-specific profile by appending this at the bottom of the same file (the --- is YAML's document separator and lets you have multiple profiles in one file):
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+  datasource:
+    url: jdbc:mysql://mysql:3306/user_service_db
+    username: root
+    password: root
+
+
+Rebuild the Jar
+mvn -pl user-service -am clean package -DskipTests
+
+Step 4 : Rebuild the Docker image as you have changed application.yml
+docker build -t library/user-service:1.0 user-service
+
+Step 5 : Run the user service on the same docker network
+docker run --rm ^
+  --name user-service ^
+  --network library-net ^
+  -e SPRING_PROFILES_ACTIVE=docker ^
+  -p 8081:8081 ^
+  library/user-service:1.0
+
+Now everything you can test from postman the service is up in docker
+
+docker exec -it mysql mysql -uroot -proot user_service_db -e "SELECT * FROM users;"
+
+Containers in Docker get their own network namespace, which means 'localhost' inside a container refers to itself, not the host machine. To let containers communicate, I attach them to the same user-defined bridge network — Docker automatically provides DNS resolution by container name, so my Spring Boot service can connect to MySQL using the hostname 'mysql' as if it were a real DNS name. I use Spring profiles to swap the JDBC URL between 'localhost' for native runs and 'mysql' for containerized runs, activated via the SPRING_PROFILES_ACTIVE environment variable. This keeps the same JAR working in both environments

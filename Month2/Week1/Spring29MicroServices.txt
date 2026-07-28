@@ -1,0 +1,227 @@
+A monolith is a single application where ALL features, ALL code, and ALL functionality live inside one project, are compiled into one deployable artifact (one JAR/WAR file), run as one process, and usually talk to one database.
+
+Advantages 
+Simple to develop
+Simple to test
+Simple to deploy
+Simple to debug
+Fast in-process calls
+Easy refactoring
+
+1) Your LMS today starts in ~5 seconds. Imagine it has 500 controllers, 2000 services, 50 dependencies (Kafka, Redis, Elasticsearch, etc.). Startup time: 3-5 minutes. Every code change → wait 5 minutes to see the result. Developer productivity dies.
+2) Single point of failure A bug in BorrowService throws OutOfMemoryError → JVM crashes → users CAN'T log in, CAN'T browse books, CAN'T do ANYTHING. One broken feature kills everything.
+3) Suppose 90% of your traffic is "browse books" (read-heavy) and 1% is "borrow book" (write-heavy). To scale the read traffic, you must deploy 10 copies of the ENTIRE monolith — including the BorrowService you don't need to scale. You're paying for CPU/RAM you don't use
+4) Team A works on BookService. Team B works on UserService. Both push to the same Git repo, same main branch. Team A's bad commit breaks the build → Team B can't deploy. Merge conflicts every day. With 50 developers, this becomes hell.
+5) Your monolith is in Java 17 + Spring Boot 3. You want to use Python for a machine-learning recommendation engine. Too bad — you can't mix languages in one JVM process. The whole monolith must stay Java.
+6) ONE database serves ALL features. If borrow_records table gets 10M rows and a slow query locks it, ALL features waiting on that DB connection pool get blocked. BookService can't fetch books because the connection pool is exhausted.
+
+What is a Microservice?
+A microservice is a small, independent application that:
+-> Owns ONE business capability
+-> Has its OWN codebase
+-> Builds into its OWN deployable ( its own jar file )
+-> Runs as its OWN process (its own JVM, its own port)
+-> Owns its OWN database (no other service touches its tables directly)
+-> Communicates with other services ONLY via the network (HTTP REST, or messaging like Kafka)
+
+One service = one job
+The single most important word in microservices is independent. 
+
+A microservice must be independently:
+-> Developed — different teams can work on it without coordination
+-> Tested — you can test it without starting other services
+-> Deployed — you can release v2 of BookService without touching UserService
+-> Scaled — you can run 10 copies of BookService and only 1 copy of UserService
+-> Failed — if BookService crashes, UserService keeps working
+
+1) Slow startup : Each microservice is small. BookService has maybe 10 controllers, 15 services. Startup time: 8 seconds. You only restart the service you're working on. Developer productivity restored.
+2) Single point of failure (mostly) : If BorrowService crashes with OutOfMemoryError, only borrow features are broken. Users can still log in (UserService works), still browse books (BookService works). This is called fault isolation.
+3) Granular scaling : Read-heavy BookService getting hammered? Deploy 10 copies of just the BookService. The other services run as 1 copy each. You pay only for what you need.
+
+Production deployment:
+  user-service:    2 instances  (medium traffic)
+  book-service:    10 instances (90% of traffic is browsing)
+  borrow-service:  3 instances  (write-heavy but lower volume)
+  notification:    1 instance   (async, low priority)
+
+4) Team independence : Team A owns BookService. Team B owns UserService. Different Git repos. Different deployment pipelines. Different release schedules. Team A pushes 5 times a day; Team B pushes once a week. Neither blocks the other
+5) Polyglot architecture : BookService in Java + Spring Boot. NotificationService in Python (better libraries for email templating). RecommendationService in Python (machine learning). PaymentService in Go (high throughput). They all talk via HTTP/Kafka — the protocol doesn't care what language each service is written in.
+6) Database isolation : BookService has its own DB. If the books table gets a slow query, only BookService is affected. UserService's DB has its own connection pool, completely isolated
+
+
+The NEW Problems Microservices Introduce 
+Problem 1: Network is unreliable ( something you can't count on to work consistently)
+	In microservices, bookService lives on a different machine, possibly in a different data center. That same line of code now means :
+	Serialize the request into JSON/protobuf
+	Open a TCP connection (or reuse one)
+	Send bytes across physical network cables / wifi / the internet
+	Wait for the other server to receive, process, and respond
+	Read the response bytes back
+	Deserialize them into an object
+
+Dropped packets — The request literally never arrives. The other server has no idea you called it.
+Temporary outages — The service is down or unreachable for a few seconds (deploys, network blips, overloaded server).
+Timeouts (the worst one) — You sent the request, but no response came back in time. 
+
+Problem 2: Distributed transactions are HARD
+
+	In the monolith, "borrow a book" was simple:
+@Transactional
+public void borrowBook(Long userId, Long bookId) {
+    Book book = bookRepo.findById(bookId);
+    book.setAvailable(false);          // Update books table
+    bookRepo.save(book);
+    
+    BorrowRecord record = new BorrowRecord(userId, bookId);
+    borrowRepo.save(record);            // Insert borrow_records table
+    
+    // If anything fails, @Transactional rolls back BOTH operations
+}
+
+In microservices:
+	Step 1: BorrowService calls BookService over HTTP to mark book unavailable
+	Step 2: BorrowService inserts into its own borrow_records DB
+
+What if Step 1 succeeds but Step 2 fails? The book is marked unavailable, but no borrow record exists. Data inconsistency.
+@Transactional does NOT work across services because they have separate databases.
+You need patterns like Saga, 2-Phase Commit, or eventual consistency
+
+Problem 3: Debugging is a nightmare
+In the monolith, one request → one stack trace. Easy.
+In microservices, one user request might hit 5 services:
+User → APIGateway → UserService → BookService → BorrowService → NotificationService
+
+Problem 4: Operational complexity
+Microservices (your future LMS): 4 JARs, 4 sets of logs, 4 health checks, 4 processes. And in real companies — 50, 200, even 1000 microservices.
+You now NEED:
+Docker — to package each service consistently
+Kubernetes — to orchestrate hundreds of containers
+Service Discovery (Eureka) — services need to find each other dynamically
+API Gateway (Spring Cloud Gateway) — single entry point for clients
+Centralized logging (ELK stack — Elasticsearch + Logstash + Kibana)
+Centralized monitoring (Prometheus + Grafana)
+Centralized config (Spring Cloud Config)
+
+This is why microservices need a DevOps culture . you literally cannot run microservices in production without containers.
+
+Problem 5: Data duplication and eventual consistency
+In microservices, books and users are in DIFFERENT databases. You CAN'T do a SQL JOIN across them. You have options:
+
+Problem 6: Testing is harder
+Monolith: One JUnit run, done.
+Microservices: To test BorrowService end-to-end, you need BookService and UserService running too. Or you mock them. Or you use contract testing (tools like Pact). Or you use TestContainers to spin up dependencies in Docker for tests.
+
+Problem 7: Cost
+Running 4 JVMs uses more memory than running 1 JVM. Add Kubernetes, monitoring tools, message brokers (Kafka cluster), service mesh — and you're spending 3-5x more on infrastructure than a monolith would cost.
+
+A Distributed Monolith is when you split your application into multiple services (so it LOOKS like microservices), but the services are so tightly coupled that you can't deploy, scale, or fail them independently.
+
+You have all the pain of microservices (network calls, complexity, ops overhead) with NONE of the benefits (independence, fault isolation, independent scaling).
+
+Mistake 1: Shared database
+Mistake 2: Synchronous chain calls
+	User clicks "Borrow Book" button
+   		 ↓
+	APIGateway → BorrowService 
+                    ↓ (HTTP call)
+                UserService (check user is valid)
+                    ↓ (HTTP call)
+                BookService (check book is available)
+                    ↓ (HTTP call)
+                NotificationService (send confirmation)
+                    ↓ (HTTP call)
+                EmailService (send email)
+                    ↓ (HTTP call)
+                AuditService (log the action)
+Mistake 3: Tight schema coupling
+	BookService returns book data like this:
+	{
+ 	 "id": 1,
+  	"title": "Clean Code",
+  	"author": "Robert Martin",
+  	"isbn": "978-0132350884"
+	}
+BorrowService consumes this JSON. Hardcodes the field names.
+Now BookService wants to rename isbn to isbn13. The moment they deploy, BorrowService BREAKS because it's still looking for isbn. So both teams must coordinate a deployment.
+
+The fix: API versioning (/api/v1/books, /api/v2/books), backward compatibility, consumer-driven contracts. Never break existing consumers.
+
+Symptoms of a distributed monolith
+To deploy service A, you must also deploy services B and C at the same time
+All services share a database
+A single user request makes 5+ synchronous service calls in a chain
+Teams must coordinate every release across multiple services
+When one service is slow, everything is slow
+You can't run a service locally without running all the others
+Changing one service's API breaks others immediately
+
+The distributed monolith is when you have all the operational pain of microservices but none of the architectural benefits. It happens when services share a database, depend on synchronous chains, or split by technical layers instead of business capabilities. The fix is database-per-service, async messaging for non-critical paths, and splitting by bounded contexts.
+
+A modular monolith is one deployable JAR, but the code is organized into well-defined modules with strict boundaries:
+Before going microservices, I'd build a modular monolith. Get the boundaries right first. Then extract services only when there's a concrete reason — independent scaling, team autonomy, or fault isolation. Microservices-first is premature optimization.
+
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Questions And Answers ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Microservices is an architectural style where a single application is built as a suite of small, independent services, each owning a specific business capability, running in its own process, and communicating over the network
+
+This contrasts with a monolithic architecture where all features live in one codebase, one deployable, one process, and usually share one database. Monoliths are simpler to start with but become harder to scale, deploy, and maintain as the system grows.
+
+The defining property of microservices is independence — services must be independently developed, tested, deployed, scaled, and able to fail without affecting others. This is enforced through database-per-service ownership, API-based communication, and bounded-context boundaries from Domain-Driven Design.
+
+Microservices solve real problems — granular scaling, team autonomy, fault isolation, polyglot architecture — but they introduce new challenges: network unreliability, distributed transactions requiring patterns like Saga, eventual consistency, operational complexity needing Docker and Kubernetes, and significantly higher infrastructure cost. So they're not universally better — they're a trade-off.
+
+I follow the 'Monolith First' principle — start with a well-structured modular monolith, then extract microservices only when there's a concrete reason: independent scaling needs, team size, or fault isolation requirements. Premature microservices is one of the most expensive architectural mistakes a team can make.
+
+A monolith is one codebase, one deployable artifact, one process, usually one database — all features tightly integrated. Microservices break that into multiple small services, each owning one business capability, with its own database, deployable independently, communicating over HTTP or messaging.
+The fundamental difference is coupling. In a monolith, all features share memory, code, and DB — making in-process calls cheap but coupling everything together. In microservices, services are isolated — slower communication via network, but each can evolve, scale, and fail independently.
+Monoliths are better for small teams, early-stage products, or when domain boundaries are unclear. Microservices win at scale — large teams, mature DevOps, clear business domains
+
+First, network unreliability — every inter-service call can fail, time out, or be slow. We design for failure with retries, timeouts, and circuit breakers.
+Second, distributed transactions are hard. We can't use @Transactional across services. We need patterns like Saga or rely on eventual consistency.
+Third, operational complexity — you need Docker, Kubernetes, service discovery, API gateways, centralized logging, distributed tracing. That requires DevOps maturity.
+Fourth, debugging is harder — one request crosses multiple services, so you need correlation IDs and tools like Zipkin or Jaeger.
+Fifth, cost — running multiple JVMs plus infrastructure for monitoring, messaging, and orchestration costs significantly more than a monolith.
+These are why microservices should never be the default choice. They solve specific problems and create new ones
+
+A distributed monolith is when you split a monolith into services, but they remain tightly coupled — typically through a shared database, synchronous chain calls, or tight schema dependencies. The result is the worst of both worlds: you have all the operational complexity and network overhead of microservices, but you can't deploy, scale, or fail them independently
+
+How do microservices communicate with each other?
+
+Two main patterns: synchronous and asynchronous.
+Synchronous uses HTTP REST — typically via RestTemplate, WebClient, or OpenFeign for declarative clients. The caller waits for a response. Good for request-response semantics like 'get user details'. The risk is cascade failures — we mitigate this with circuit breakers, timeouts, and retries.
+Asynchronous uses messaging — typically Kafka or RabbitMQ. The producer publishes an event without waiting; consumers process it independently. Good for fire-and-forget operations like 'send welcome email' or event-driven workflows. Provides better fault tolerance and scalability.
+A good system uses BOTH — sync for queries where you need an immediate answer, async for events and notifications. Choosing wrong here is a major source of distributed monoliths
+
+How do you handle data consistency across microservices?
+We can't use @Transactional across services — each owns its own database. Three main approaches:
+Saga pattern — Break a transaction into a sequence of local transactions, each publishing an event that triggers the next. If a step fails, we run compensating transactions to undo previous steps. Works well for business workflows like order processing.
+Two-phase commit (2PC)
+Eventual consistency 
+
+What is the Circuit Breaker pattern?
+Circuit Breaker prevents cascade failures when a downstream service is unavailable. It works like an electrical circuit breaker — it has three states:
+Closed — Normal operation, requests pass through.
+Open — After a threshold of failures, the circuit opens and immediately fails all requests for a cooldown period — instead of waiting for timeouts, we fail fast. This protects both the caller's threads and gives the failing service time to recover.
+Half-Open — After the cooldown, it allows a few test requests through. If they succeed, it goes back to Closed. If they fail, it stays Open.
+
+
+What is the Saga pattern? Explain choreography vs orchestration
+Saga is a pattern for managing distributed transactions across microservices without using 2PC. It breaks a long-running transaction into a sequence of local transactions, each in a different service. If any step fails, compensating transactions undo the previous steps.
+Two ways to coordinate:
+Choreography — Each service listens for events and decides what to do. No central coordinator. For example, OrderService publishes 'OrderCreated' → PaymentService reacts → publishes 'PaymentDone' → InventoryService reacts. Simpler, more decoupled, but the workflow logic is scattered across services — hard to understand the full flow.
+Orchestration — A central orchestrator service tells each participant what to do and when. OrderOrchestrator calls PaymentService, then InventoryService, then ShippingService — handling failures and compensations explicitly. Easier to understand and modify the workflow, but adds a coordinator service that can become a single point of failure.
+Choreography is better for simple flows; orchestration is better for complex workflows with many steps and compensations
+
+How do you do a JOIN across microservices?
+(1) API composition — call each service and combine results in code, fine for low traffic;
+(2) CQRS with a read model — maintain a denormalized view updated via events, fine for high-read scenarios; 
+(3) Reconsider the boundary — if you frequently need to join two services' data, they might belong in one service.
+
+
+
+
+
+
+

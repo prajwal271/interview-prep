@@ -1,0 +1,423 @@
+							URL Shortener
+
+Part 1: The Universal System Design Framework
+
+Step 1 — Requirements Clarification (5 min). Never start drawing. First, understand what you're building. Ask about:
+Functional requirements — what the system does (features). "Should short URLs expire? Custom aliases? Analytics?"
+Non-functional requirements — the qualities it must have (scale, latency, availability, consistency). "How many URLs/day? Read or write heavy? How fast must redirects be?"
+Scope — pin down what's in and out. Interviewers give deliberately vague prompts to see if you narrow scope instead of boiling the ocean.
+
+Step 2 — Estimation / Scale (5 min). Do the back-of-envelope math (Day 71, Part 7!). Compute QPS (read & write), storage, bandwidth. Why: these numbers justify every later decision. "20,000 reads/sec and 10:1 read-heavy → I need caching and replicas." Without numbers, your design is arbitrary; with them, every choice has a reason
+
+Step 3 — API Design (3 min). Define the API contract — the key endpoints (Day 73, Part 7). This clarifies exactly what the system does from the outside and forms the backbone the rest of the design serves. Usually just 2–3 endpoints.
+
+Step 4 — Data Model / Schema (4 min). What data do you store, and in what shape? Define the entities/tables. This drives your SQL vs NoSQL choice (Day 72) — based on the data's structure, relationships, and access pattern.
+
+Step 5 — High-Level Design (10 min). Now you draw. Sketch the major components and how a request flows through them: client → load balancer → app servers → cache → database. Start simple and correct — a working skeleton — before optimizing. Get one end-to-end path working on the board.
+
+Step 6 — Scale & Deep Dive (13 min). Take the simple design and scale it to the numbers from Step 2, and go deep where the interviewer probes. This is where you deploy everything from Days 71–73: add caching (read-heavy?), replication (read scaling), sharding (data too big?), CDN, queues (async work?), rate limiting. Identify bottlenecks and address them, always naming the trade-off. This step is where senior candidates shine — it's a conversation, not a monologue; the interviewer will push on specific parts.
+
+The mnemonic: R-E-A-D-H-S — Requirements, Estimation, API, Data, High-level, Scale. (Conveniently, most systems are read-heavy, so "READ" sits at the front.) Or just remember: understand → quantify → contract → model → draw → scale.
+
+"Before I design anything, let me clarify the requirements and scope, then estimate scale — those numbers will drive the architecture. Then I'll define the API and data model, sketch a high-level design, and finally scale it and go deep where you'd like."
+
+Part 2: Requirements & Scope (Framework Step 1)
+Now we apply the framework to TinyURL. Step 1 is where you show seniority — resist the urge to design; first define what you're building. In a real interview this is a dialogue (you ask, the interviewer answers). Since I'm playing interviewer, I'll pose the questions and give the answers we'll design against — but notice the questions themselves, because asking them is what scores.
+
+What a URL Shortener Does (the basic premise)
+Take a long URL like https://www.example.com/articles/2026/system-design/very-long-path?ref=xyz and produce a short one like https://tiny.url/aB3xK9. When someone visits the short URL, they get redirected to the original long URL. That's it — two operations: shorten and redirect
+
+Functional Requirements (what the system DOES)
+The clarifying questions to ask, and our decided scope:
+Core (in scope):
+Shorten a URL — given a long URL, return a short URL. (The write path.)
+Redirect — given a short URL, redirect to the original long URL. (The read path — this will dominate.)
+
+Questions to ask about optional features (each changes the design — asking shows you think about scope):
+3. Custom aliases? — can users pick their own short code (tiny.url/my-brand)? → Let's say yes, optionally. (Affects the generation strategy.)
+4. Expiration? — do short URLs expire after a time, or live forever? → Let's support optional expiration (default: never). (Affects data model + cleanup.)
+5. Analytics? — track click counts, referrers, geography? → Let's say basic click tracking is a nice-to-have (we'll note where it fits but keep it secondary).
+6. User accounts? — do users log in to manage their URLs? → Out of scope for now — keep focus. (Good scoping move: explicitly cut things.)
+
+Non-Functional Requirements (the QUALITIES — this drives the architecture)
+
+These matter more than the features for system design, because they dictate your scaling decisions. The questions and our answers:
+
+Scale — how many URLs created per day? → Let's say 100 million new URLs/day. (We'll do the real math in Part 3, but establish the ballpark now.)
+Read vs write ratio? → Heavily read-heavy. Every short URL is created once but clicked many times. Assume roughly 100:1 reads:writes (redirects vastly outnumber creations). This single fact will shape everything — it screams caching + read replicas (Day 72–73). Establishing it now tells the interviewer you already know where this design is headed.
+Latency — how fast must redirects be? → Redirects must be very fast (low latency, ~milliseconds). A slow redirect is a terrible experience — the user is waiting to get to their actual destination. This is a read-latency-critical system → another vote for aggressive caching.
+Availability vs consistency (CAP — Day 72)? → Availability is the priority. The system must always be up — if the shortener is down, every short link everywhere breaks. We can tolerate slight inconsistency: if a newly-created URL takes a second to be redirectable everywhere (eventual consistency), that's acceptable. So this is an AP system (available, eventually consistent) — not a CP system like a bank. Redirects working > perfect instant consistency. (Contrast with the money example — different priorities, different choice. Naming why it's AP-not-CP is a strong signal.)
+URL length? → Short as possible while fitting the scale. We'll derive the needed length from the numbers in Part 4 (this connects to the core algorithm) — a nice touch is letting the math tell you the length rather than guessing.
+
+Why This Step Matters So Much
+
+Look at what we just established before drawing a single box:
+
+It's read-heavy (100:1) → caching + replicas will be central.
+Redirects must be fast → read-path latency is the priority.
+It's AP, not CP → we optimize for availability and accept eventual consistency.
+Scale is 100M writes/day → we'll need real storage planning and likely sharding.
+
+Functionally it's two operations — shorten and redirect — plus optional custom aliases and expiration; I'd scope out accounts and dashboards for now. The non-functional requirements are what drive the design: it's extremely read-heavy at roughly 100:1, redirects must be low-latency, and I'd prioritize availability over strict consistency — an AP system — since a working redirect matters more than instant global consistency. That points me toward heavy caching, read replicas, and eventual consistency, which I'll build out after estimating scale.
+
+Part 3: Estimation & API Design (Framework Steps 2–3)
+
+Step 2: Back-of-the-Envelope Estimation
+
+Given (from Part 2): 100 million new URLs/day, 100:1 read:write ratio.
+
+Write QPS (URLs created/sec) — use 1 day ≈ 100,000 seconds (Day 71):
+
+100,000,000 ÷ 100,000 = ~1,000 writes/sec
+
+Read QPS (redirects/sec) — 100:1 ratio:
+
+1,000 × 100 = ~100,000 reads/sec
+
+Immediately observe: 100K reads/sec vs 1K writes/sec. This is the headline number. It confirms Part 2's instinct with hard math: this system lives or dies on read performance → caching and read replicas are non-negotiable. Say this out loud — "the 100:1 read dominance means I'll design the read path first and cache aggressively."
+
+Storage — how much do we accumulate?
+
+Per URL, we store: the short code, the long URL, timestamp, maybe expiry/owner. A long URL can be up to ~2,000 chars, but average ~100 bytes; with metadata, call it ~500 bytes per record (round generously).
+Per day: 100M × 500 bytes = 50 GB/day
+Per year: 50 GB × 365 ≈ ~18 TB/year
+Over 5 years: ~90 TB
+
+Key takeaway: ~18 TB/year won't fit or scale on one machine long-term → we'll need sharding (Day 72), and the data grows forever unless URLs expire. Another number → another decision.
+
+The count that drives the algorithm — total URLs over the system's life:
+
+100M/day × 365 × 5 years ≈ ~180 billion URLs
+Remember this number — in Part 4 it tells us exactly how many characters the short code needs. (Foreshadow: how many characters does it take to represent 180 billion unique values? The math will answer it precisely.)
+
+Bandwidth:
+
+Writes: 1,000/sec × 500 bytes = 500 KB/sec incoming. Trivial.
+Reads: 100,000/sec, but a redirect response is tiny (just an HTTP 301 with the long URL in a header, ~500 bytes) = ~50 MB/sec outgoing. Modest — and cacheable.
+
+Memory for cache (preview of Part 6) — how much RAM to cache the hot URLs? A classic rule: ~20% of URLs drive ~80% of traffic (Pareto). Caching the hot 20% of daily reads: if ~100M redirects/day and we cache the frequently-hit ones, even caching a day's hot set of, say, a few million entries × 500 bytes ≈ a handful of GB — easily fits in Redis. So caching is not just useful, it's cheap and feasible. That's a great point to make: "the hot set fits comfortably in memory, so a cache can absorb most of the 100K reads/sec."
+
+What the numbers told us (the whole point of Step 2):
+
+100:1 read-heavy → cache + read replicas (read path is everything)
+18 TB/year → sharding + expiration policy
+180 billion total URLs → determines short-code length (Part 4)
+Hot set fits in RAM → caching is cheap and highly effective
+
+Step 3: API Design
+
+Now the contract (Day 73, Part 7). A URL shortener needs just two core endpoints — clean and small.
+1. Shorten (the write):
+POST /api/v1/shorten
+Body:  { "longUrl": "https://example.com/very/long/path",
+         "customAlias": "my-link"   (optional),
+         "expiresAt": "2027-01-01"  (optional) }
+Response 201: { "shortUrl": "https://tiny.url/aB3xK9" }
+
+POST, because it creates a resource (and isn't idempotent by default — creating twice could make two codes). (Idempotency note from Day 73: we could accept an idempotency key so retrying the same shorten request returns the same code instead of generating a new one — a nice detail to mention.)
+
+2. Redirect (the read — the hot path):
+GET /{shortCode}          e.g. GET /aB3xK9
+Response 301: Location: https://example.com/very/long/path
+
+GET, naturally idempotent (Day 73) — reading a redirect changes nothing, so it's safely cacheable and retryable.
+Returns an HTTP redirect status with the long URL in the Location header; the browser then goes there automatically.
+
+The one design decision worth calling out here — 301 vs 302 (interviewers love this):
+
+301 Moved Permanently — the browser/intermediaries cache the redirect. Future visits to the short URL may go straight to the long URL without hitting our server. → Great for reducing load (fewer requests reach us), but we lose click analytics (we never see the cached hits) and can't change the target.
+302 Found (temporary) — not cached; every visit comes back to our server, which then redirects. → We see every click (analytics!) and retain control, but higher load (every redirect hits us).
+
+
+301 offloads traffic but blinds us to clicks; 302 captures every click but sends all traffic through us. Since we want analytics and control — and we're building caching/replicas to handle the read load anyway — I'd lean 302. If analytics didn't matter and pure scale did, 301." This ties directly to Part 2's "analytics is a nice-to-have" and shows you connect an API detail to a business requirement.
+
+Two endpoints: POST /shorten to create — non-idempotent, optionally with an idempotency key — and GET /{code} to redirect, which is idempotent and cacheable. The key decision is the redirect status: 301 is cached by browsers so it offloads us but hides analytics and locks the target; 302 routes every click back to us for tracking and control at higher load. I'd choose 302 to keep analytics, since we're caching and replicating to handle the reads anyway.
+
+Part 4: Generating Short URLs — The Core Problem
+
+What "Short Code" Even Means: Base-62 Encoding
+
+First, the encoding foundation — the "aB3xK9" format. A short code uses characters from:
+
+0–9 (10 digits)
+a–z (26 lowercase)
+A–Z (26 uppercase)
+
+That's 62 possible characters per position — hence base-62. (Why not include symbols like +/? Because base-64 uses characters that need URL-encoding or look ugly in a link. Base-62 = only clean, URL-safe alphanumerics. Worth stating.)
+
+Why base-62 is powerful — exponential capacity. Each character position has 62 options, so with n characters you get 62ⁿ possible codes:
+
+62¹ = 62
+62⁴ ≈ 14 million
+62⁵ ≈ 916 million
+62⁶ ≈ 56 billion
+62⁷ ≈ 3.5 trillion
+
+Now the payoff of Part 3's math. We estimated ~180 billion total URLs over 5 years. So:
+
+62⁶ ≈ 56 billion → not enough (we'd run out).
+62⁷ ≈ 3.5 trillion → comfortably covers 180 billion, with room to grow.
+
+So 7 characters is our answer — and notice we didn't guess it, the scale estimate derived it. That's the elegant move: "7 base-62 characters gives 3.5 trillion codes, which covers my estimated 180 billion URLs with plenty of headroom, so short codes are 7 characters." Deriving length from scale is a strong signal.
+
+Base-62 is just a way to represent a number compactly. aB3xK9 is really some big number written in base-62 instead of base-10 — the same way hexadecimal writes numbers in base-16. So the real question becomes: how do we get the unique number to encode? That's where the approaches differ.
+
+Approach 1: Counter-Based (the clean winner)
+
+Idea: keep a single global counter. Every new URL gets the next number: 1, 2, 3, 4... Then base-62 encode that number to get the short code.
+
+URL #1 → number 1 → base-62 → 1
+URL #1,000,000 → base-62 → 4c92 (or whatever it encodes to)
+URL #56,800,235,584 → base-62 → a 7-char code
+
+Why it's great:
+
+Guaranteed unique — no collisions ever. Each number is used once (the counter only goes up), so no two URLs ever get the same code. This completely sidesteps the collision problem that plagues hashing (Approach 2). Huge win.
+Short codes. The counter produces the smallest numbers first, so early codes are 1–2 chars, growing as needed. Efficient.
+Fast. Just increment and encode — trivial computation.
+
+The one hard problem — and it's the interesting part: how do you maintain a single global counter across many app servers? Remember Day 71 — you have many stateless servers. If each server keeps its own counter, they'd all generate 1, 2, 3... and collide. The counter must be global and coordinated. This is the exact "shared state across servers" challenge from Day 71, and here's how you solve it:
+
+Solution — a counter range service (the senior answer): Instead of servers hitting a shared counter on every request (which would be a bottleneck — one contended counter serializing all writes), each app server requests a block/range of numbers at once from a central coordinator, and hands them out locally.
+
+Server A grabs range 1–1000, Server B grabs 1001–2000, Server C grabs 2001–3000.
+Each server assigns from its own block locally (fast, no coordination per-request), and only contacts the coordinator again when its block runs low.
+No collisions (ranges don't overlap), and the coordinator is hit rarely (once per 1000 URLs, not once per URL) → not a bottleneck.
+
+Tools for the coordinator: Zookeeper (built for distributed coordination), or a database sequence, or Redis INCRBY (atomically grab a range). This "hand out ID ranges" pattern is exactly how real distributed ID generators work.
+
+(Related name-drop for depth: Twitter Snowflake — a scheme that generates unique 64-bit IDs without a central counter by combining a timestamp + machine ID + a per-machine sequence number. Each server generates IDs independently with zero coordination, and they're still globally unique. Mentioning Snowflake as an alternative to the range-counter shows real depth.)
+
+Approach 2: Hash-Based (intuitive, but flawed)
+
+Idea: take the long URL, run it through a hash function (like MD5/SHA-256), and take the first few characters as the short code.
+
+hash("https://example.com/long") → "a1b2c3d4e5..." → take first 7 chars → a1b2c3d
+
+Why it seems appealing: no counter needed, each server can compute independently (stateless!), and the same URL naturally maps to the same code (built-in deduplication).
+
+Why it's problematic — collisions (the fatal flaw interviewers want you to catch): a hash output is huge, but we're chopping it to 7 characters. Two different URLs can produce the same first-7-chars — a collision. Then two URLs map to one code → redirect chaos (one overwrites the other).
+
+Handling collisions is painful: on each insert you must check if the code already exists; if it collides, rehash (append something and hash again) and check again. This means extra DB lookups on every write (does this code exist?), and collisions get more frequent as the space fills — degrading over time. It works, but it's messy and slower.
+
+The verdict: hashing is intuitive but the collision handling makes it inferior to the clean counter approach for a from-scratch design. The counter never collides by construction.
+
+Approach 3: Random Generation (simple, same flaw)
+
+Idea: just generate a random 7-character base-62 string for each URL; check if it's taken; if so, try again.
+
+Pro: dead simple, no coordination, and codes are unpredictable (a mild security plus — you can't guess/enumerate other codes, unlike a sequential counter where aB3xK8 hints aB3xK9 exists).
+Con: same collision problem as hashing — must check-and-retry, and retries increase as the space fills.
+
+The Decision (what to actually say)
+
+Counter-based + base-62 is the cleanest primary answer, precisely because it eliminates collisions by construction — the single biggest headache of the alternatives. State it with the trade-off:
+
+"I'd use a counter-based approach: a global counter gives each URL a unique number, base-62 encoded to a 7-character code. This guarantees uniqueness with no collision checks, unlike hashing or random generation which require check-and-retry that worsens as the keyspace fills. The challenge is a global counter across distributed servers, so I'd use a range-allocation service — each server grabs a block of IDs from a coordinator like Zookeeper or Redis and assigns locally, avoiding per-request coordination. If I wanted zero central coordination, Twitter Snowflake-style IDs are the alternative."
+
+One trade-off of the counter to acknowledge (balance): sequential codes are predictable/enumerable — someone could iterate aB3xK8, aB3xK9, aB3xKA... and discover other people's URLs. If that's a concern, you either add randomness, use Snowflake, or accept it (for a public URL shortener, links aren't usually secret). Naming this weakness unprompted shows maturity — you're not overselling your choice.
+
+Handling the Optional Features (tie back to Part 2)
+Custom aliases: if a user wants tiny.url/my-brand, just check if my-brand is already taken; if free, store it directly (bypassing the counter); if taken, reject. Easy to bolt on.
+Deduplication (same URL → same code): the counter approach gives a new code each time the same long URL is shortened. If you want identical URLs to reuse one code, you'd look up the long URL first (needs an index on it) — but this adds a read per write and most shorteners don't bother (they're fine with duplicates). A trade-off worth mentioning, not necessarily implementing.
+
+The core is generating unique 7-character base-62 codes — 62⁷ ≈ 3.5 trillion, covering my 180-billion estimate. I'd use a counter encoded to base-62 rather than hashing, because a counter is collision-free by construction while hashing/random need check-and-retry that degrades as the space fills. For the distributed-counter problem I'd allocate ID ranges per server via a coordinator, so we avoid per-request contention. The trade-off is enumerable codes; if that mattered I'd use Snowflake-style IDs or add randomness
+
+Part 5: Data Model & Storage (Framework Step 4)
+The Data Model — What We Store
+The core entity is the URL mapping. The essential fields:
+short_code    (string, 7 chars)  — the key: "aB3xK9"
+long_url      (string)           — where it redirects: "https://example.com/..."
+created_at    (timestamp)        — when it was made
+expires_at    (timestamp, null)  — optional expiration (from Part 2)
+user_id       (string, null)     — optional owner (if we add accounts later)
+
+The Critical Access Pattern (this drives everything)
+
+Before choosing a database, ask: how is this data accessed? (Day 72's core lesson — pick the DB by access pattern, not preference.)
+The dominant operation (100K/sec): given a short_code, find the long_url. That's it. A key → value lookup by primary key. No joins, no complex queries, no scanning, no filtering.
+The write (1K/sec): insert a new mapping. Simple.
+
+This is the single most important observation: our access pattern is a simple key-value lookup. We look up by short_code and get back the long_url. We essentially never query "all URLs created in January" or "join URLs to something else." It's get(short_code) → long_url.
+
+The SQL vs NoSQL Decision
+The SQL vs NoSQL Decision
+
+Now apply Day 72's framework. Let's reason it honestly (interviewers want the reasoning, and this one can genuinely go either way):
+
+What the requirements say:
+
+Data is simple, no relationships → we don't need SQL's relational strengths (joins, complex queries). That's a point against needing SQL.
+Access is key-value lookup → this is exactly what NoSQL key-value/wide-column stores are built for and optimized for. Point for NoSQL.
+Massive scale — 180 billion rows, 18 TB/year → we established this needs sharding (Day 72). And NoSQL is built to scale horizontally / shard natively, whereas sharding SQL is painful. Big point for NoSQL.
+We prioritized availability (AP) over strict consistency (Part 2) → NoSQL (BASE/AP) aligns with this; a URL mapping being eventually consistent is fine. Point for NoSQL.
+Extremely read-heavy at massive scale → NoSQL stores like Cassandra/DynamoDB handle huge read (and write) volume across a cluster well.
+
+The verdict: this is a case where NoSQL is the natural fit — specifically a key-value store (like DynamoDB) or wide-column store (like Cassandra). The reasoning chain: simple key-value access + massive horizontal scale + availability-over-consistency = the exact profile NoSQL was designed for.
+
+Given the data is a simple key-value mapping with no relationships, the access is a primary-key lookup, and we need to scale to hundreds of billions of rows with availability prioritized over strict consistency — this is a textbook NoSQL fit. I'd use a key-value or wide-column store like DynamoDB or Cassandra, sharded on the short_code.
+
+That said, SQL would work perfectly fine too, especially early on. A single Postgres instance can handle millions of rows and this QPS with the short_code as an indexed primary key — and it's simpler to start with. The push toward NoSQL comes specifically from the scale (180 billion rows needing easy horizontal sharding) and the availability priority. So: start with SQL if scale is modest; choose NoSQL when the scale and sharding needs dominate — which for this stated scale, they do.
+
+This balanced answer — "NoSQL for this scale, but SQL is a fine simpler starting point, and here's exactly what tips the decision" — is far stronger than dogmatically picking one. It shows you decide on evidence, not fashion.
+
+Sharding Strategy (Day 72 applied)
+
+Since we need to shard, how? Recall Day 72: pick a shard key that's high-cardinality, evenly distributed, and matches the access pattern.
+
+Shard by short_code (hash-based). It's the perfect shard key: it's what we look up by (so every read hits exactly one shard — no scatter-gather), it's high-cardinality (billions of unique values), and hashing distributes it evenly (no hotspots).
+shard = hash(short_code) % N → the read for aB3xK9 goes straight to the one shard holding it. Single-shard lookup, fast.
+And from Day 72 — use consistent hashing so we can add shards as we grow (180 billion rows over years) without a massive reshuffle.
+
+Even with a fast NoSQL store, we established the hot set fits in RAM (Part 3). So in front of the database sits Redis caching the hottest short_code → long_url mappings. Most of the 100K reads/sec will be served from cache (a cache hit), and only misses hit the database. We'll wire this fully in Part 6 — but note the data layer is designed to be cached: key-value data is trivially cacheable (the cache is literally the same get(short_code) shape)
+
+The schema is a single simple entity — short_code, long_url, timestamps, optional expiry — with no relationships, accessed purely as a key-value lookup by short_code. That plus hundreds-of-billions scale and an availability priority makes NoSQL the natural choice — DynamoDB or Cassandra, sharded on short_code via consistent hashing so every lookup is single-shard. SQL would work as a simpler starting point; scale is what tips it to NoSQL. And since the data is key-value, it caches trivially in Redis in front of the store.
+
+Part 6: Full Architecture & Scaling (Framework Steps 5–6)
+
+The Two Request Flows (walk these out loud in an interview)
+Flow 1: Shortening a URL (the write path — 1K/sec)
+Client sends POST /shorten with the long URL.
+Request hits the load balancer (L7, from Day 71), which routes it to one of many stateless app servers (any server works — statelessness from Day 71).
+The app server needs a unique ID → it takes the next number from its pre-allocated ID range (the counter service handed it a block, e.g. 1001–2000; Part 4). No per-request coordination — it just uses the next local number.
+It base-62 encodes that number → the 7-char short_code (Part 4).
+It writes {short_code → long_url, created_at, ...} to the sharded NoSQL database (sharded by short_code, Part 5).
+It (optionally) populates the cache with the new mapping, and returns the shortUrl to the client.
+
+Fast, simple, no bottleneck. The write path is the easy one.
+
+Flow 2: Redirecting (the read path — 100K/sec — THE hot path)
+
+This is the one that must be blazing fast and handle the enormous read volume:
+
+Client visits GET /aB3xK9 → hits the load balancer → a stateless app server.
+The server needs long_url for aB3xK9. It checks Redis first (cache-aside, Day 73):
+Cache hit (the common case — most reads) → get long_url from Redis in sub-millisecond time → return the 302 redirect (Part 3). Done without touching the database. This is how we serve ~100K reads/sec.
+Cache miss → query the database (single-shard lookup by short_code — fast, Part 5) → get long_url → store it in Redis (so next time it's a hit) → return the redirect.
+Browser follows the Location header to the long URL.
+
+The key scaling insight: because it's 100:1 read-heavy and the hot set fits in RAM (Part 3), the cache absorbs the vast majority of the 100K reads/sec, and only misses (a small fraction) reach the database. The cache is what makes the read-heavy load survivable — exactly what Part 2's requirements predicted.
+
+Scaling Each Layer (Step 6 — deploy everything from Days 71–73)
+
+Now walk each component and show how it scales — this is where you demonstrate the whole week's knowledge:
+
+1. App servers → horizontal scaling (Day 71). They're stateless (no session — the ID range is fine, it's just a local number block), so we run many behind the load balancer and add more as traffic grows. Auto-scaling handles spikes. Any server handles any request.
+
+2. Load balancer → redundancy (Day 71). Active-passive pair with a floating IP so the LB isn't a SPOF. Use L7 to route and potentially rate-limit.
+
+3. Cache → the read-scaling workhorse (Day 73). Redis absorbs most reads. Scale it by clustering/sharding Redis if one instance isn't enough for the hot set. Use LRU eviction (keep hot URLs, drop cold ones) with a TTL. This layer is doing the heaviest lifting — it's why 100K reads/sec is manageable.
+
+4. Database → replication + sharding (Day 72).
+
+Sharding by short_code (Part 5) spreads the 18 TB/year across machines — each shard holds a slice, every lookup is single-shard.
+Replication (each shard has replicas) gives read-scaling for cache misses and redundancy (a shard dying doesn't lose data). Reads (misses) spread across replicas; writes go to the shard's primary.
+Consistent hashing so we add shards over years without a massive reshuffle.
+
+5. Counter service → the ID generator (Part 4). Hands out ID ranges via Zookeeper/Redis. Hit rarely (once per ~1000 URLs), so not a bottleneck. Made redundant so it's not a SPOF.
+
+6. Analytics → async via queue (Day 73, the bottom of the diagram). Here's where the Kafka/queue knowledge lands. Since we chose 302 (every click hits us, Part 3), each redirect can emit a click event onto a message queue (Kafka!). A separate consumer processes these asynchronously — counting clicks, aggregating geography/referrers — without slowing the redirect. The redirect returns immediately; analytics happens in the background. This is exactly the async decoupling pattern from Day 73: the user-facing path stays fast, non-essential work goes async. (And the consumer must be idempotent — Day 73 — since the queue is at-least-once, so a duplicate click event doesn't double-count.)
+
+7. CDN (optional, Day 73). For extreme scale, some redirect traffic could be handled at the edge, though with 302 (not cached) the CDN helps less; this is more relevant if we chose 301. Worth mentioning as a lever.
+
+The Complete Picture — Every Piece Traced to a Requirement
+
+Notice how every component traces back to a stated requirement (the traceability that signals seniority):
+
+Read-heavy 100:1 (Part 2) → cache + read replicas (the read path is optimized above all).
+Redirects must be fast (Part 2) → Redis cache serving sub-ms hits.
+AP / availability priority (Part 2) → redundancy everywhere + eventual consistency (cache/replica lag is fine).
+180B URLs / 18 TB/yr (Part 3) → sharding + consistent hashing.
+Unique codes (Part 4) → counter + base-62, no collisions.
+Key-value access (Part 5) → NoSQL + trivially cacheable.
+Analytics (Part 2) → 302 + async queue + idempotent consumer.
+
+That's the whole week deployed on one problem, each choice justified by evidence. This is what a complete, senior-level design answer looks like.
+
+Interview soundbite (the full-system summary): "Clients hit an L7 load balancer routing to stateless app servers. For writes, a server grabs a pre-allocated ID range, base-62 encodes it to a 7-char code, and stores it in a sharded NoSQL DB. For reads — the hot 100K/sec path — the server checks Redis first and returns a 302; on a miss it reads the single shard and populates the cache. Redis absorbs most reads since we're 100:1 read-heavy with a hot set that fits in RAM. The DB is sharded on short_code with replicas and consistent hashing. Click analytics go async via a queue to an idempotent consumer, keeping redirects fast. Everything's redundant for the availability priority.
+
+Follow-up 1: "Two users request the same custom alias simultaneously — what happens?"
+
+This is a race condition question (concurrency — your Java strength). Both users send POST /shorten with customAlias: "my-brand" at the same instant. Both servers check "is my-brand taken?" → both see "no" → both try to write it → collision (one silently overwrites the other, or data corrupts).
+
+The fix — atomic check-and-set. You can't check-then-write as two separate steps (that's the race). You need the "claim it if free" to be one atomic operation:
+
+Database unique constraint — make short_code a unique key. Both inserts fire; the database guarantees only one succeeds, the other gets a "duplicate key" error → we return "alias taken" to that user. The DB enforces atomicity for us.
+Or conditional write (INSERT ... IF NOT EXISTS, or DynamoDB's conditional put, or Redis SETNX — "set if not exists"). Same idea: atomic "write only if absent."
+
+Say it like this: "That's a race condition — two check-then-writes interleaving. I'd make it atomic with a unique constraint on short_code or a conditional 'write if not exists', so exactly one succeeds and the other is cleanly rejected. Never check-then-write as separate steps under concurrency." (This connects to Day 72's isolation/ACID and your concurrency background — a strong answer.)
+
+Follow-up 2: "How do you handle URL expiration and cleanup?"
+
+We support optional expires_at (Part 2). Two questions: how to enforce expiry, and how to clean up expired rows.
+
+Enforcement (lazy): on redirect, check if expires_at < now → return 404/410 instead of redirecting. Simple, no background work — expired links just stop working when accessed.
+Cleanup (reclaiming space): expired rows still take storage. Options:
+TTL on the database rows — Cassandra/DynamoDB support automatic TTL expiry (the DB deletes expired rows itself). Cleanest.
+A background batch job — periodically scans and deletes expired entries (a cron/scheduled worker).
+Also evict from cache on expiry (or let the cache TTL handle it).
+
+Follow-up 3: "A cached URL's target needs to change / how do you handle cache invalidation?"
+
+The famous hard problem (Day 73). If a mapping changes or is deleted but the cache holds the old value → stale redirects.
+
+For a URL shortener, mappings are mostly immutable (a short code's target rarely changes), so this is less severe than in other systems — a nice point to make.
+When it does change (or on delete): invalidate the cache key on write (delete short_code from Redis so the next read repopulates fresh), plus a TTL as a safety net (Day 73's two-pronged approach).
+
+Say it: "Short-code mappings are mostly immutable, so invalidation is rarely needed. When a target changes or a link is deleted, I invalidate the cache key on the write and rely on a TTL as a backstop."
+
+Follow-up 4: "A single link goes viral — millions of hits. What happens?" (Hotspot / hot key)
+
+A celebrity tweets one short link → millions of redirects for one short_code. Does this break anything?
+
+Good news: this is a read, and it's the same key → served from cache (one hot Redis entry). A single cached key handling millions of reads is exactly what Redis excels at — no database load at all (after the first miss). So our design already handles this well — worth stating confidently.
+The subtle risk — cache stampede (Day 73): if that one hot key expires at the moment millions are hitting it, they all miss simultaneously → all hammer the database for the same key → spike. Fixes (Day 73): request coalescing (one request repopulates, others wait), stale-while-revalidate, or simply never expire / long-TTL known-hot keys.
+Also: because app servers are stateless and the LB spreads them, no single server is overwhelmed — the load distributes.
+
+Say it: "A viral link is a single hot key, which the cache handles beautifully — millions of reads off one Redis entry, zero DB load. The only risk is a stampede if that key expires under load, so I'd coalesce misses or keep hot keys long-lived. Statelessness means no single server is a hotspot either." (This is a great answer because you show the design already handles it, then preempt the one edge case.)
+
+Follow-up 5: "How do you implement analytics at scale?"
+
+We chose 302 (every click hits us) + async queue (Part 6). At 100K clicks/sec, how do we count without drowning?
+
+Don't write to the DB synchronously per click (would swamp it). Instead: emit each click as an event to Kafka → consumers aggregate asynchronously (Day 73).
+Aggregate, don't store every raw click forever — increment counters (per link, per day) rather than storing 100K rows/sec. Use batch aggregation or a time-series/analytics store.
+Consumers must be idempotent (Day 73) — at-least-once delivery means a click event might arrive twice; dedup or use idempotent increments so counts stay accurate.
+
+Say it: "Clicks emit events to a queue; consumers aggregate counters asynchronously so the redirect path stays fast and the DB isn't hit per-click. Consumers are idempotent since delivery is at-least-once. I'd aggregate into counters rather than storing every raw click." (Full Day-73 deployment.)
+
+Follow-up 6: "What if the database goes down?"
+
+Availability question (our AP priority, Part 2).
+
+Replication (Day 72): each shard has replicas + automatic failover — a replica is promoted if a primary dies, so a single node failure doesn't take us down.
+The cache as a shield: even during a DB blip, the cache keeps serving all the hot URLs (most traffic) — so most redirects still work. Graceful degradation: new writes might fail temporarily, but existing popular links keep redirecting.
+This is why we prioritized availability and built redundancy everywhere.
+
+Say it: "Each shard is replicated with automatic failover, so a node death isn't an outage. And the cache shields us — during a DB hiccup, hot links keep redirecting from Redis, so we degrade gracefully rather than going fully down, matching our availability priority."
+
+For most follow-ups I'd trace back to a principle: races → atomic check-and-set; hot keys → cache handles it, watch for stampede; invalidation → invalidate-on-write plus TTL; DB failure → replication with failover, and the cache shields reads. I try to show where the design already absorbs the problem, and name the trade-off where there's a real choice.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

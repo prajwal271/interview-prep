@@ -1,0 +1,359 @@
+Single Responsibility Principle (SRP)
+Open/Closed Principle (OCP)
+Liskov Substitution Principle (LSP)
+Interface Segregation Principle (ISP)
+Dependency Inversion Principle (DIP)
+
+SOLID Means these three principles we use in software 
+
+You've felt this — you touch one class to add a small feature, and suddenly three unrelated things break. That pain has names, and SOLID is designed to prevent each one:
+Rigidity — a small change forces changes in many other files.
+Fragility — you change one thing and something unrelated breaks.
+Tight coupling — classes know too much about each other, so you can't reuse or test one without dragging the others along.
+Hard to test — if a class does five things and talks directly to a database and a network, you can't unit-test it in isolation.
+
+Following SOLID buys you code that is easy to extend, easy to test and safe to change.
+
+S — Single Responsibility Principle (SRP) : A class should have only one reason to change. Put differently — a class should do one job, own one concern, answer to one "stakeholder."
+Imagine one employee at a restaurant who cooks the food, serves the tables, and does the tax accounting. When the menu changes, you poke the cook. When tax law changes, you poke the accountant. But it's the same person — so every change risks disturbing the other jobs, and you can never let just one of those skills go. Splitting them into three people means each changes independently. Classes are the same.
+
+The Single Responsibility Principle says a class should have only one reason to change — it should be responsible to a single actor or concern. If a class handles business logic, formatting, and persistence together, a change to any one of those risks the others and makes the class hard to test and reuse. I keep each concern in its own class — for example, separating a report's data model from its formatter and its storage — so each can change and be tested independently. In my own reporting framework I applied this by splitting report generation from the upload/storage layer, which let me swap file storage for a Cloudinary uploader without touching the report logic
+
+Consider a report class in that 3 functionality are there
+-> get the no of report lines 
+-> Format the Report lines
+-> Save the report in a particular file
+
+O — Open/Closed Principle (OCP)
+Software entities should be open for extension, but closed for modification. In plain words: you should be able to add new behavior by writing new code, not by editing existing, working, already-tested code.
+
+Open for extension — the system can grow; you can give it new capabilities.
+Closed for modification — but you do that without going back and re-opening classes that already work.
+
+When you buy a new appliance, you plug it in — you don't unscrew the wall and rewire the house. The wall socket is closed (you never touch it), but the system is open (you can add any new device). This is also exactly why your plugin engine exists: the host stays sealed and you add capabilities by dropping in new plugins, not by editing the host every time.
+
+A class that violates OCP — an exporter with a big if/else on the format:
+
+public class ReportExporter {
+
+    public String export(Report report, String format) {
+        if (format.equals("html")) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("<h1>").append(report.getTitle()).append("</h1>");
+            for (String row : report.getRows()) {
+                sb.append("<p>").append(row).append("</p>");
+            }
+            return sb.toString();
+
+        } else if (format.equals("csv")) {
+            return String.join("\n", report.getRows());
+
+        } else {
+            throw new IllegalArgumentException("Unknown format: " + format);
+        }
+    }
+}
+
+Walking the problem: today it handles HTML and CSV. Tomorrow your Elevance client wants JSON. Next month someone wants XML. Every single new format means re-opening this class, editing the if/else chain, and re-testing the whole thing — including HTML and CSV, which were already working and had no business being touched. This class is not closed for modification: it changes for a reason that should have been an addition. One typo in the JSON branch and you've risked breaking CSV. That's the fragility we talked about.
+
+The OCP-compliant refactor — put the varying behavior behind an abstraction, then extend by adding classes:
+
+// The abstraction — the "socket" everything plugs into
+public interface ReportFormatter {
+    String format(Report report);
+}
+
+public class HtmlReportFormatter implements ReportFormatter {
+    public String format(Report report) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<h1>").append(report.getTitle()).append("</h1>");
+        for (String row : report.getRows()) {
+            sb.append("<p>").append(row).append("</p>");
+        }
+        return sb.toString();
+    }
+}
+
+public class CsvReportFormatter implements ReportFormatter {
+    public String format(Report report) {
+        return String.join("\n", report.getRows());
+    }
+}
+
+And the exporter now depends on the interface, not on any specific format:
+
+public class ReportExporter {
+    public String export(Report report, ReportFormatter formatter) {
+        return formatter.format(report);   // no if/else, no knowledge of format types
+    }
+}
+
+You added a new class and touched nothing else. ReportExporter, HtmlReportFormatter, and CsvReportFormatter never moved — they stay closed, tested, and safe. That's OCP: extend the system's behavior without modifying its existing parts.
+
+Notice this is the natural sequel to SRP — because we'd already split formatting into its own classes, opening the system up to new formats was easy. And notice the mechanism: polymorphism through an interface.
+
+you can't make code closed against every possible change — and trying to is a trap. If you wrap every class in interfaces "just in case," you drown in abstraction for changes that never come (that's speculative over-engineering)
+
+The Open/Closed Principle says software should be open for extension but closed for modification — you add new behavior by writing new code, not by editing existing, tested code. The classic smell is a growing if/else or switch on a type: every new case forces you to reopen and risk breaking a working class. The fix is to pull the varying behavior behind an interface and add a new implementation for each new case, so existing code stays untouched."
+
+
+L — Liskov Substitution Principle (LSP)
+
+This is the trickiest of the five, because it's the one where the intuition "a square is a rectangle, so Square should extend Rectangle" turns out to be wrong
+Objects of a subclass must be substitutable for objects of their base class without breaking the program. In plain words: if some code works with a Parent, it must keep working correctly when you hand it any Child — no surprises, no special-casing, no things that suddenly throw or misbehave.
+
+if S is a subtype of T, then anywhere you use a T, you should be able to use an S and the program still behaves correctly. It's really a rule about honoring the behavioral contract of the parent, not just matching its method signatures.
+
+The classic violation — Square extends Rectangle:
+Mathematically a square is a rectangle, so inheritance feels right. Watch what happens.
+
+public class Rectangle {
+    protected int width;
+    protected int height;
+
+    public void setWidth(int width)   { this.width = width; }
+    public void setHeight(int height) { this.height = height; }
+
+    public int getArea() { return width * height; }
+}
+
+The contract a Rectangle promises: width and height are independent — setting one leaves the other alone. Now the square:
+
+public class Square extends Rectangle {
+
+    // A square must keep all sides equal, so setting width also sets height...
+    @Override
+    public void setWidth(int width) {
+        this.width = width;
+        this.height = width;   // side effect the parent never promised
+    }
+
+    @Override
+    public void setHeight(int height) {
+        this.width = height;   // and vice versa
+        this.height = height;
+    }
+}
+
+Individually that looks reasonable — of course a square keeps its sides equal. The problem shows up when code written against Rectangle gets handed a Square:
+
+What if you have passed squares reference to the same size check method
+
+public void resizeAndCheck(Rectangle r) {
+    r.setWidth(5);
+    r.setHeight(4);
+    // This code was written trusting the Rectangle contract:
+    // width and height are independent, so area MUST be 5 * 4 = 20.
+    assert r.getArea() == 20 : "Expected 20 but got " + r.getArea();
+}
+
+here it works for rectangle but fails for square for square first it will set the width to 5 that will set the height also , then while setting the height it will set the width as well , which will set the area to 16 even though the area is different
+
+
+How to fix it — model the real relationship instead of forcing inheritance. For the shapes, the honest design is that both are shapes with an area, and neither is a base for the other:
+
+public interface Shape {
+    int getArea();
+}
+
+public class Rectangle implements Shape {
+    private final int width;
+    private final int height;
+
+    public Rectangle(int width, int height) {   // set at construction, no mutable trap
+        this.width = width;
+        this.height = height;
+    }
+
+    public int getArea() { return width * height; }
+}
+
+public class Square implements Shape {
+    private final int side;
+
+    public Square(int side) { this.side = side; }
+
+    public int getArea() { return side * side; }
+}
+
+Now there's no inheritance lie. Rectangle and Square are siblings, both honoring the simple Shape contract (getArea()), and any code written against Shape works correctly with either. Making the fields final (immutable) also removes the mutable-setter trap entirely — there's no setWidth to override treacherously.
+
+The Liskov Substitution Principle says subclasses must be substitutable for their base class without breaking correctness — anywhere the code expects a parent type, any child must work with no surprises. It's about honoring the parent's behavioral contract, not just matching method signatures. The classic violation is Square extends Rectangle: a square keeps its sides equal, so overriding setWidth also changes height, which breaks any code that assumed width and height are independent — even though a square 'is-a' rectangle mathematically. Another common smell is a subclass overriding an inherited method just to throw UnsupportedOperationException
+
+I — Interface Segregation Principle (ISP)
+
+No client should be forced to depend on methods it does not use. In plain words: prefer many small, focused interfaces over one big "does-everything" interface. Don't make a class implement (and drag around) methods that make no sense for it.
+The name says it exactly — segregate your interfaces. Split the fat one into role-specific pieces, so each class only signs up for the contract it can actually honor
+
+A "fat interface" that violates ISP:
+
+public interface TestDevice {
+    void launchApp(String bundleId);
+    void tap(int x, int y);
+    void swipe(int x1, int y1, int x2, int y2);
+    void rotateScreen();       // mobile-only
+    void setGpsLocation(double lat, double lng);  // mobile-only
+    void pressPhysicalButton(String button);      // mobile-only
+    void executeJavaScript(String script);        // web-only
+    void resizeBrowserWindow(int w, int h);       // web-only
+}
+
+Now implement it for a browser. A browser has no GPS, no physical buttons, can't rotate a phone screen — but the interface forces those methods to exist:
+public class WebBrowserDevice implements TestDevice {
+    public void launchApp(String bundleId) { /* open URL */ }
+    public void tap(int x, int y) { /* click */ }
+    public void swipe(int x1, int y1, int x2, int y2) { /* scroll */ }
+    public void executeJavaScript(String script) { /* real */ }
+    public void resizeBrowserWindow(int w, int h) { /* real */ }
+
+    // Forced to implement things a browser can't do:
+    public void rotateScreen() {
+        throw new UnsupportedOperationException("Browsers can't rotate");
+    }
+    public void setGpsLocation(double lat, double lng) {
+        throw new UnsupportedOperationException("No GPS on a browser");
+    }
+    public void pressPhysicalButton(String button) {
+        throw new UnsupportedOperationException("No physical buttons");
+    }
+}
+
+Walking the problems: WebBrowserDevice is now forced to depend on methods it can't support, so it fills them with UnsupportedOperationException — and notice that's also an LSP violation (a caller holding a TestDevice and calling setGpsLocation will crash on a browser). The two principles reinforce each other: a fat interface almost forces Liskov violations. On top of that, every implementer is coupled to the whole surface — add a web-only method to the interface and every mobile device class must recompile and re-stub it, even though it's irrelevant to them. The interface changes for reasons that have nothing to do with most of its clients.
+
+split by capability (role)
+// Capabilities every device shares
+public interface Device {
+    void launchApp(String bundleId);
+    void tap(int x, int y);
+    void swipe(int x1, int y1, int x2, int y2);
+}
+
+// Mobile-only capabilities
+public interface MobileCapabilities {
+    void rotateScreen();
+    void setGpsLocation(double lat, double lng);
+    void pressPhysicalButton(String button);
+}
+
+// Web-only capabilities
+public interface WebCapabilities {
+    void executeJavaScript(String script);
+    void resizeBrowserWindow(int w, int h);
+}
+
+Now each class implements only what it can actually do, and Java lets a class implement multiple interfaces, so nothing is lost:
+
+public class WebBrowserDevice implements Device, WebCapabilities {
+    public void launchApp(String bundleId) { /* open URL */ }
+    public void tap(int x, int y) { /* click */ }
+    public void swipe(int x1, int y1, int x2, int y2) { /* scroll */ }
+    public void executeJavaScript(String script) { /* real */ }
+    public void resizeBrowserWindow(int w, int h) { /* real */ }
+    // No GPS/rotate/button stubs — those interfaces simply aren't implemented.
+}
+
+public class AndroidDevice implements Device, MobileCapabilities {
+    public void launchApp(String bundleId) { /* adb launch */ }
+    public void tap(int x, int y) { /* real */ }
+    public void swipe(int x1, int y1, int x2, int y2) { /* real */ }
+    public void rotateScreen() { /* real */ }
+    public void setGpsLocation(double lat, double lng) { /* real */ }
+    public void pressPhysicalButton(String button) { /* real */ }
+}
+
+The Interface Segregation Principle says no client should be forced to depend on methods it doesn't use — prefer several small, role-focused interfaces over one fat one. The smell is a class implementing an interface but stubbing out methods with empty bodies or UnsupportedOperationException, which also tends to violate Liskov. 
+
+
+D — Dependency Inversion Principle (DIP)
+
+-> High-level modules should not depend on low-level modules. Both should depend on abstractions.
+-> Abstractions should not depend on details. Details should depend on abstractions.
+
+your important business logic should not be wired directly to specific low-level tools. Both should talk through an interface in the middle. The word "inversion" is the key insight, and I'll show you exactly what gets inverted 
+ the wall socket again, but now look at who defines the shape. Your laptop charger doesn't depend on the power station, and the power station doesn't depend on your charger. Both depend on the socket standard in the middle. Crucially — the socket dictates the plug shape, and the appliance conforms to it. The consumer (the high-level side) owns the contract; the supplier conforms. Hold that thought.
+
+A class that violates DIP — high-level logic reaching straight for a concrete tool:
+
+// Low-level detail: a specific way of sending notifications
+public class EmailSender {
+    public void sendEmail(String to, String message) {
+        // SMTP connection, etc.
+    }
+}
+
+// High-level policy: what should happen when a test run finishes
+public class TestReportNotifier {
+    private final EmailSender emailSender = new EmailSender();  // hard-wired to a concrete class
+
+    public void notifyOnFailure(String testName) {
+        emailSender.sendEmail("team@company.com",
+                "Test failed: " + testName);
+    }
+}
+
+High Level Module TestReportNotifier depends on EmailSender
+
+Walking the problem: TestReportNotifier is the high-level thing — it holds the policy "when a test fails, notify the team." But it news up an EmailSender directly, so it's welded to email specifically. Now the pain:
+Client wants Slack notifications instead? You have to edit TestReportNotifier — the important policy class — to swap in a SlackSender. (That's also an OCP violation.)
+You can't unit-test notifyOnFailure without actually firing SMTP, because there's no way to substitute a fake sender.
+The high-level policy now knows intimate details of a low-level tool (SMTP). The dependency arrow points the wrong way: important code → trivial detail.
+
+The DIP-compliant refactor — introduce the abstraction and invert the arrow:
+
+// The abstraction — owned by the high-level side, expressing what IT needs
+public interface NotificationSender {
+    void send(String message);
+}
+
+
+// Low-level details now CONFORM to the abstraction
+public class EmailSender implements NotificationSender {
+    public void send(String message) {
+        // SMTP send
+    }
+}
+
+public class SlackSender implements NotificationSender {
+    public void send(String message) {
+        // POST to Slack webhook
+    }
+}
+
+// High-level policy depends ONLY on the interface, never on a concrete tool
+public class TestReportNotifier {
+    private final NotificationSender sender;   // abstraction, not a concrete class
+
+    // The dependency is handed IN, not created inside (this is Dependency Injection)
+    public TestReportNotifier(NotificationSender sender) {
+        this.sender = sender;
+    }
+
+    public void notifyOnFailure(String testName) {
+        sender.send("Test failed: " + testName);
+    }
+}
+
+
+// Email today...
+TestReportNotifier notifier = new TestReportNotifier(new EmailSender());
+notifier.notifyOnFailure("CheckoutTest");
+
+// ...Slack tomorrow — TestReportNotifier is NEVER edited:
+TestReportNotifier slackNotifier = new TestReportNotifier(new SlackSender());
+
+Before, the arrow ran high-level → low-level: TestReportNotifier depended on EmailSender. After, EmailSender depends on the NotificationSender interface, and so does TestReportNotifier. The low-level detail's arrow now points up toward the abstraction. That flip — details pointing up at the contract instead of policy pointing down at details — is the "inversion." And notice who owns the interface: NotificationSender is defined in terms of what the high-level policy needs ("send a message"), and the concrete senders conform to it.
+
+The Dependency Inversion Principle says high-level modules and low-level modules should both depend on abstractions, not on each other, and abstractions shouldn't depend on details — details depend on abstractions. The point is to keep important business logic from being welded to specific tools. For example, instead of a TestReportNotifier that creates an EmailSender directly, I define a NotificationSender interface owned by the high-level side; EmailSender and SlackSender implement it, and the notifier receives one through its constructor. Now switching to Slack or testing with a fake sender never touches the policy class. Dependency Injection is the technique I use to apply it — passing the dependency in rather than newing it up — and a Spring IoC container automates that injection. 
+
+
+
+
+
+
+
+
+
+
+
+
+

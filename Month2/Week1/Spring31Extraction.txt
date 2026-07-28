@@ -1,0 +1,134 @@
+EXTRACTING USER-SERVICE
+1. Why user-service First? 
+The golden rule of extraction: Extract the LEAST dependent service first.
+Because when you extract a service, it must be able to stand on its own. If you extract a service that depends on three others that don't exist yet, you're stuck — you'd have to mock or stub those dependencies.
+
+user-service     → depends on NOTHING (it's self-contained)
+book-service     → depends on NOTHING (it's self-contained)
+borrow-service   → depends on user-service AND book-service
+notification     → depends on borrow-service (via events)
+
+Why not book-service first? (Both have no dependencies)
+Both user and book are dependency-free, so either could go first. We pick user-service because:
+
+Almost everything needs user identity. Authentication, authorization — user is the most fundamental concept. Getting it right first sets the foundation.
+It exercises the most patterns. User-service involves entities, repositories, validation, and (later) security. Building it first teaches you patterns you'll reuse in every other service.
+It's the natural mental starting point. "Who is using the system?" comes before "what are they borrowing?"
+
+Both user and book were dependency-free, so either could go first. I chose user because identity is the most foundational concept and it exercises the core patterns I'd reuse across all services
+
+PUT (full) / PATCH (partial)
+
+200 OK — success (GET, PUT)
+201 Created — resource created successfully (POST)
+204 No Content — success but nothing to return (DELETE)
+400 Bad Request — client sent invalid data
+404 Not Found — resource doesn't exist -- wrong url
+500 Internal Server Error — server crashed
+
+The Entity lives inside your application and maps to the database. The DTO travels over the network. You CONVERT between them. This separation is crucial:
+Security — never leak sensitive entity fields
+Flexibility — change your database without breaking your API
+Validation — DTOs carry validation rules for incoming data
+
+<scope>runtime</scope> — it means this JAR isn't needed when COMPILING your code (you never reference PostgreSQL classes directly), only when RUNNING (Hibernate uses it under the hood). Marking it runtime keeps your compile classpath clean.
+
+ORM (Object-Relational Mapping) is the technique of automatically converting between these two worlds. Hibernate (which JPA uses) does this for you. You define a Java class, annotate it, and Hibernate handles all the SQL.
+Without ORM, you'd write SQL by hand:
+
+String sql = "INSERT INTO users (username, email) VALUES (?, ?)";
+PreparedStatement ps = connection.prepareStatement(sql);
+ps.setString(1, user.getUsername());
+ps.setString(2, user.getEmail());
+ps.executeUpdate();
+// ... and dozens more lines for every operation
+
+The no-arg constructor
+protected User() {} — JPA REQUIRES a no-argument constructor. Hibernate uses it internally to create entity instances when loading from the database (it creates an empty object, then fills the fields via reflection). We make it protected (not public) so application code doesn't accidentally create empty, invalid users — but Hibernate (in the same package hierarchy) can still use it.
+
+The real constructor
+public User(String username, String email, String passwordHash, String fullName) — The constructor YOUR code uses to create new users. It takes the meaningful fields. Notice it does NOT take id (database generates it) or timestamps (set automatically via lifecycle callbacks).
+
+@PrePersist — A JPA lifecycle callback. The annotated method runs AUTOMATICALLY just before the entity is first saved (INSERT). We use it to set both timestamps. You never manually set createdAt — JPA does it for you right before insertion.
+@PreUpdate — Runs automatically just before an UPDATE. We update updatedAt to the current time. So every modification refreshes the timestamp automatically.
+These callbacks mean timestamp management is fully automatic — you never forget to set them.
+
+What you get for FREE from JpaRepository You will get around 15 methods by default and you can use them , if required you can add more methods in the interface not their implementation 
+
+findBy,existsBy,countBy,deleteBy,And,Or,GreaterThan,LessThan,Like,OrderBy,Containing these are the keywords that you can use in the Repository layer in spring application 
+
+Optional is Java's way of saying "this might or might not contain a value." It's a box that either holds a User or is empty.
+If any particular record is not present it will give empty result which will be null in order to avoid null pointer exception we will use this class to store the data given by the repository so that we will check whether data is present or not and then , if present we will get the value or else we will send that the value is not present 
+
+Optional<User> maybeUser = userRepository.findByUsername("prajwal");
+
+if (maybeUser.isPresent()) {
+    User user = maybeUser.get();
+    // use the user
+} else {
+    // handle "user not found" gracefully
+}
+
+
+In DTO's we will need public no arg constructor because No-arg constructor + getters/setters — Jackson (Spring Boot's JSON library) needs these to convert incoming JSON into this object. When a client sends {"username": "prajwal", ...}, Jackson creates a CreateUserRequest, then calls setUsername("prajwal"), etc.
+
+This is Dependency Injection (DI) — Spring INJECTS the dependencies your class needs, rather than your class creating them itself. You declare what you need; Spring provides it.
+Why it is good ?
+Testability — In tests, you can inject a FAKE repository (a mock) instead of a real one. You can't easily do this if the class created its own dependencies with new.
+Loose coupling — UserService doesn't care HOW the repository is built. It just needs one.
+Single responsibility — UserService focuses on business logic, not on wiring up objects.
+
+Why final? private final UserRepository userRepository — final means it must be set in the constructor and can never change afterward. This guarantees the dependency is always present and immutable. Best practice for injected dependencies.
+
+@PostMapping
+public ResponseEntity<UserResponse> createUser(
+        @Valid @RequestBody CreateUserRequest request) {
+    UserResponse created = userService.createUser(request);
+    return ResponseEntity.status(HttpStatus.CREATED).body(created);
+}
+
+@Valid — THIS is what triggers validation. Remember the @NotBlank, @Email, @Size annotations on CreateUserRequest? They only get checked if @Valid is present here. When a request arrives, Spring validates the DTO BEFORE your method runs. If validation fails (e.g., email is invalid, username too short), Spring automatically returns a 400 Bad Request with the error messages — your method never even executes. This is validation for free.
+
+
+PostgreSQL ("Postgres") is a database SERVER — remember our server discussion? It's a program that runs forever, listens on a port (5432 by default), and responds to SQL queries. Your user-service will connect to it over the network (even though it's on the same machine) to store and fetch users.
+
+V1__create_users_table.sql — Flyway has STRICT naming rules:
+V — capital V, means "Versioned migration"
+1 — version number
+__ — TWO underscores (not one) separating version from description
+create_users_table — description (snake_case)
+.sql — extension
+
+How Flyway works at startup
+When user-service starts:
+
+Flyway connects to user_service_db
+It checks a special table called flyway_schema_history (which it auto-creates) to see which migrations have already run
+It finds V1__create_users_table.sql hasn't run yet
+It executes the SQL → creates the users table + indexes
+It records "V1 applied" in flyway_schema_history
+Next time you start, it sees V1 already ran and skips it
+
+This is version-controlled database schema — your table definitions live in your code repo, applied automatically and consistently everywhere.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

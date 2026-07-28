@@ -1,0 +1,273 @@
+Builder is a creational pattern, like Factory, but it answers a different question. Factory asks "which object should I create?" Builder asks "how do I construct one complicated object, piece by piece, when it has many parts — several of them optional — without ending up with a monstrous constructor?" It's the pattern for taming objects that are painful to assemble, not painful to choose.
+
+Builder is really about readability and safe construction of complex objects — turning an error-prone pile of constructor arguments into something you can read like a sentence and can't finish in an invalid state.
+
+Problem A — the telescoping constructor
+You start simple, then reality adds fields. Because some fields are optional, you write overloaded constructors for the common combinations — and they "telescope," each calling the next:
+
+public class TestConfig {
+    private final String platform;
+    private final String browser;
+    private final int timeout;
+    private final int retries;
+    private final boolean recordVideo;
+    private final boolean headless;
+
+    // Just the required field
+    public TestConfig(String platform) {
+        this(platform, "chrome");
+    }
+    // platform + browser
+    public TestConfig(String platform, String browser) {
+        this(platform, browser, 30);
+    }
+    // + timeout
+    public TestConfig(String platform, String browser, int timeout) {
+        this(platform, browser, timeout, 0);
+    }
+    // + retries
+    public TestConfig(String platform, String browser, int timeout, int retries) {
+        this(platform, browser, timeout, retries, false);
+    }
+    // + recordVideo
+    public TestConfig(String platform, String browser, int timeout,
+                      int retries, boolean recordVideo) {
+        this(platform, browser, timeout, retries, recordVideo, false);
+    }
+    // the "real" constructor everything funnels into
+    public TestConfig(String platform, String browser, int timeout,
+                      int retries, boolean recordVideo, boolean headless) {
+        this.platform = platform;
+        this.browser = browser;
+        this.timeout = timeout;
+        this.retries = retries;
+        this.recordVideo = recordVideo;
+        this.headless = headless;
+    }
+}
+
+It doesn't scale. Six fields already gave us five constructors. Every new optional field multiplies the combinations you might want, and you can't provide them all — you provide a guessed subset, and callers who want a different combination are stuck.
+You can't skip a middle field. Say you want to set platform and headless but leave timeout and retries at defaults. There's no constructor for that combination — you're forced to pass values for timeout and retries just to reach headless. Optional fields aren't really optional; they're "optional only in the order I anticipated."
+
+TestConfig config = new TestConfig("android", "chrome", 30, 3, true, false);
+The "long parameter list" smell — a caller can't understand the call without leaving it.
+
+the JavaBeans alternative, and why it's also wrong
+The usual escape from telescoping constructors is the setter approach — a no-arg constructor plus setters:
+
+TestConfig config = new TestConfig();
+config.setPlatform("android");
+config.setBrowser("chrome");
+config.setTimeout(30);
+config.setHeadless(true);
+// ... call whichever setters you need
+
+This is more readable — each setter names its field, and you set only what you want. But it trades one problem for two worse ones:
+The object is mutable. It now has public setters, so anyone can change config after it's built — including code far away that you didn't anticipate
+
+The object can exist in an invalid, half-built state. Between new TestConfig() and the last setter, the object is incompletely constructed. If some other code grabs it after setPlatform but before setTimeout, it sees a config with a default/zero timeout. There's no single moment where you can guarantee "this object is now complete and valid." With required fields, this is dangerous — nothing forces the caller to set platform at all.
+
+
+Builder is the pattern that gives you both good halves and neither bad half: the readability and optional-field flexibility of setters, plus the immutability and atomic "fully-built-or-not-at-all" safety of the constructor. You describe the object step by step in a readable way, and then a single .build() call produces one complete, validated, immutable object — with no way to leave it half-constructed and no way to mutate it afterward.
+
+
+Builder solves the problem of constructing objects that have many parameters, especially when several are optional. The two common approaches both fail: telescoping constructors — overloaded constructors that call each other — don't scale, force you to pass values for fields you wanted to leave default, and produce unreadable call sites where you can't tell what new Config(true, 30, false) means, with silent bugs when same-typed arguments get swapped. The JavaBeans setter approach is more readable but makes the object mutable and allows it to exist in a half-built, invalid state with no single point where it's guaranteed complete. Builder gives you the best of both: readable, flexible step-by-step construction for optional fields, plus a single build() call that produces one complete, validated, immutable object. I reach for it when a class has roughly four or more parameters, particularly with optional or same-typed fields.
+
+package com.design.pattern.builder;
+
+public class Student {
+    private final String name;
+    private final int studentId;
+    private final String className;
+    private final double marks;
+
+    @Override
+    public String toString() {
+        return "Student{" +
+                "name='" + name + '\'' +
+                ", studentId=" + studentId +
+                ", className='" + className + '\'' +
+                ", marks=" + marks +
+                '}';
+    }
+
+    private Student(Builder builder) {
+        this.name = builder.name;
+        this.studentId = builder.studentId;
+        this.className = builder.className;
+        this.marks = builder.marks;
+    }
+
+    public int getStudentId() {
+        return studentId;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String getClassName() {
+        return className;
+    }
+
+    public double getMarks() {
+        return marks;
+    }
+
+    public static class Builder {
+        private final String name;
+        private int studentId = 0;
+        private String className = "LKG";
+        private double marks = 99.00;
+
+        public Builder(String name) {
+            this.name = name;
+        }
+
+        public Builder id(int id) {
+            this.studentId = id;
+            return this;
+        }
+
+        public Builder className(String className) {
+            this.className = className;
+            return this;
+        }
+
+        public Builder marks(double marks) {
+            this.marks = marks;
+            return this;
+        }
+
+        public Student build() {
+            return new Student(this);
+        }
+    }
+
+    public static void main(String[] args) {
+        Student student = new Student.Builder("Prajwal").className("UKG").build();
+        System.out.println(student);
+    }
+}
+
+
+Part 1 — the outer class is immutable (final fields, no setters). Every field on TestConfig is final and there are only getters
+Part 2 — the private constructor. TestConfig's constructor is private and takes a Builder. Two consequences: (a) nobody outside can call new TestConfig(...) directly — the only way to get a TestConfig is through the Builder, which means the object can never be created half-configured; and (b) it simply copies each value out of the builder into its final field. The builder accumulates the values over several calls; the constructor snapshots them all at once into the immutable object.
+
+Part 3 — the static nested Builder class. This is the accumulator. Look at how its fields differ from the outer class:
+
+Required fields (platform) are final and set in the Builder's constructor — you cannot even create a Builder without providing them. This is how Builder enforces required fields, something setters couldn't do.
+Optional fields (browser, timeout, ...) are not final and are given sensible defaults at declaration. If the caller never calls .timeout(...), it stays 30. This is how optional fields become truly optional — set the ones you want, ignore the rest, no telescoping constructors needed.
+
+Why static? Because you need to create the Builder before a TestConfig exists — new TestConfig.Builder("android"). A non-static (inner) class would require an enclosing TestConfig instance to exist first, which is circular. static lets the Builder stand alone.
+Part 3b — return this, the chaining trick. This is the one clever line, and it's worth pausing on. Each optional-field method does two things: sets the field, then return this — returns the same Builder object. Because each call hands back the builder, you can immediately call another method on the result:
+
+Part 3c — build(), the atomic finish. build() is the single moment the real object comes into existence. It calls the private constructor, passing the fully-populated builder, and returns one complete TestConfig. 
+
+The classic Builder is a static nested class that accumulates the object's fields, then produces the object in one shot. The outer class has final fields, only getters, and a private constructor that takes the builder — so it's immutable and can only be created through the builder. The builder takes required fields in its constructor, so they're mandatory, and gives optional fields defaults with one method each. Each of those methods sets its field and returns this, which is what enables the fluent method chaining. A final build() method calls the private constructor and returns the complete immutable object. So construction is readable — every value is labeled by its method name instead of being a positional argument — required fields are enforced, optional ones are truly optional, and the object only ever exists fully-built and immutable. The return this is the key detail — that's the fluent-interface trick that makes the chain work.
+
+Part 3 — Immutability and validation
+TestConfig has all-final fields and no setters — it's immutable: once build() returns it, its state can never change. That wasn't incidental; Builder is how you get a readable, flexible way to construct an immutable object. Setters give you flexibility but destroy immutability; telescoping constructors give you immutability but destroy readability; Builder gives you both. So the two patterns travel together.
+
+But why do we want immutability badly enough to build a whole Builder around it? Three concrete reasons:
+1. Thread-safety for free. This connects straight to your concurrent execution engine. An immutable object has no mutable state, so there is nothing to synchronize — multiple threads can read the same TestConfig simultaneously with zero risk of one thread seeing a half-changed value or two threads racing on a field. 
+2. Safe to share, cache, and pass around. Because nobody can change it, you can hand the same TestConfig to ten different components and be certain none of them can mutate it and surprise the others.
+3. No invalid state after construction. Once validated at build time (below), an immutable object is guaranteed valid forever — there's no setter through which it could later be pushed into an invalid state. Validate once, trust always.
+
+Where validation goes — and why build() is the perfect spot
+Let's add validation to the build() from Part 2:
+
+public TestConfig build() {
+    // Validate BEFORE constructing — refuse to build an invalid object.
+    if (platform == null || platform.isBlank()) {
+        throw new IllegalStateException("platform is required");
+    }
+    if (timeout <= 0) {
+        throw new IllegalArgumentException("timeout must be positive, got: " + timeout);
+    }
+    if (retries < 0) {
+        throw new IllegalArgumentException("retries cannot be negative, got: " + retries);
+    }
+    if (recordVideo && headless) {
+        // a cross-field rule: can't record video in headless mode
+        throw new IllegalStateException("cannot record video while headless");
+    }
+    return new TestConfig(this);   // only reached if everything is valid
+}
+
+Fail fast, at the point of creation. If a caller tries to build a config with a negative timeout, it blows up immediately at build()
+The guarantee compounds with immutability. Validate at build() → the object is born valid. Immutable → it stays valid forever. Together: every TestConfig that exists in your program is complete and valid, for its entire lifetime
+
+"Builder naturally pairs with immutability — it's how you get readable, flexible construction while still producing an immutable object with final fields and no setters. Immutability matters because immutable objects are thread-safe for free — there's nothing to synchronize, so they're safe to share across threads, which is ideal for something like a config shared across parallel test runs. The other half is validation: because the private constructor forces every object through build(), that method is a single choke point where I validate before constructing — required fields, ranges, and cross-field rules like 'can't record video while headless.' If build() refuses to produce an invalid object, an invalid object can't exist anywhere in the system. I validate in build() rather than per-setter so cross-field rules see all fields and it's order-independent. Combined with immutability, that means every instance is guaranteed complete and valid for its whole lifetime. For mutable-typed fields I also defensively copy in the constructor so the caller can't mutate the object afterward."
+
+Factory decides which object to create (which concrete type). Builder controls how to construct one object (how to assemble a complex instance step by step).
+Factory: the concrete type varies. The whole point is that the return could be any of several implementations, chosen at runtime.
+Builder: the type is fixed, but its configuration varies. Every call to your TestConfig.Builder produces a TestConfig — same type every time — just with different field values.
+
+3. Number of parameters / steps
+
+Factory usually takes few inputs — often just a type discriminator ("android") — and produces the object in one call. DriverFactory.create("android").
+Builder is built for many parameters, assembled over multiple chained steps ending in build(). That step-by-step assembly is its entire reason to exist. If an object only has two fields, you don't need a Builder (Part 7).
+
+They're both creational but answer different questions. Factory decides which object to create — the complexity is in choosing the concrete type, you pass a discriminator like a platform string, it returns an abstraction in one call, and the type varies. Builder controls how to construct one object — the type is fixed, but it has many parameters, often optional, so you assemble it step by step with a fluent chain ending in build(), and you get back a concrete configured object. The test I apply is whether the hard part is deciding which type — that's Factory — or assembling many fields — that's Builder. And they're not mutually exclusive: they often collaborate, like a factory method that picks the platform and then uses a builder internally to assemble the config with defaults. So Factory for the 'which,' Builder for the 'how,' and both when you have a type decision and a complex assembly at once
+
+Real World Builders
+1. StringBuilder — the one you use constantly
+String result = new StringBuilder()
+        .append("Test: ")
+        .append(testName)
+        .append(" — ")
+        .append(passed ? "PASS" : "FAIL")
+        .toString();
+2. HttpRequest.newBuilder() — a textbook modern Builder (Java 11+)
+HttpRequest request = HttpRequest.newBuilder()
+        .uri(URI.create("https://api.example.com/tests"))
+        .header("Authorization", "Bearer " + token)
+        .timeout(Duration.ofSeconds(30))
+        .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+        .build();
+3. Stream.Builder — Builder in the Streams API
+Stream<String> stream = Stream.<String>builder()
+        .add("android")
+        .add("ios")
+        .add("web")
+        .build();
+
+4. Lombok's @Builder — the pattern, generated for you
+@Builder
+@Getter
+public class TestConfig {
+    private final String platform;
+    @Builder.Default private String browser = "chrome";
+    @Builder.Default private int timeout = 30;
+    private boolean headless;
+}
+
+
+Part 7 — When NOT to use Builder
+
+1. Don't use a Builder for few parameters
+2. Don't use a Builder when all fields are required 
+3. Don't use a Builder for a simple mutable object that's fine being mutable
+
+Builder is a creational pattern for constructing complex objects step by step. It solves the problem of objects with many parameters, especially optional ones, where a constructor becomes unreadable and error-prone — you can't tell what new Config(true, 30, false) means, and same-typed arguments get silently swapped. Builder replaces that with a fluent chain — .timeout(60).headless(true).build() — where every value is labeled by its method name. Each builder method sets a field and returns this to enable chaining, and a final build() produces one complete, immutable, validated object. So you get the readability and optional-field flexibility of setters, plus the immutability and atomic construction of a constructor — without the downsides of either
+
+"How does the chaining work?" → (Part 2) Each builder method sets its field and returns this — the same builder object — so you can immediately call the next method on the result. That's a fluent interface. A final build() calls a private constructor and returns the finished object.
+
+"How do required vs optional fields work?" → (Part 2) Required fields go in the builder's constructor, so you can't create a builder without them. Optional fields are separate methods with sensible defaults, so you set only the ones you want.
+
+"Where do you put validation?" → (Part 3) In build() — it's the single choke point every object must pass through, so if build() refuses to produce an invalid object, an invalid object can't exist. I validate there rather than per-setter so cross-field rules see all fields and it's order-independent.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

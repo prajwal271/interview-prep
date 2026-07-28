@@ -1,0 +1,175 @@
+ private final BookRepository bookRepo;
+
+    public BookService(BookRepository bookRepo) {
+        this.bookRepo = bookRepo;
+        // bookRepo is passed IN via constructor parameter
+        // It exists the moment constructor runs
+        // SAFE to use ✅
+        bookRepo.findAll(); // works fine
+    }
+
+if we do field injection and the use the same code in constructor then it is not safe
+
+  @Autowired
+    private BookRepository bookRepo; // injected AFTER constructor
+
+    public BookService() {
+        // Constructor runs FIRST
+        // @Autowired injection happens AFTER constructor completes
+        // bookRepo is NULL here
+        bookRepo.findAll(); // 💥 NullPointerException
+    }
+
+Step 1: Constructor runs       ← @Autowired fields are NULL here
+Step 2: @Autowired injection   ← fields get set NOW
+Step 3: @PostConstruct runs    ← SAFE to use anything here
+
+
+@PreDestroy is NOT called for prototype beans — why?
+
+Spring creates object and hands it over — won't maintain or be responsible for cleanup
+Singleton : Spring creates bean → stores reference in ApplicationContext ,Spring HOLDS this reference forever ,At shutdown → Spring finds it → calls @PreDestroy 
+Prototype : Spring creates bean → hands it to you → FORGETS it. No reference stored At shutdown → Spring can't find it Cannot call @PreDestroy
+@PostConstruct IS still called for prototype beans. Because Spring still holds the reference at creation moment. It calls PostConstruct IMMEDIATELY after creating .Then hands it off and forgets
+
+Life Cycle of a Bean
+@ComponentScan finds the class
+Spring calls constructor
+Dependencies injected
+@PostConstruct runs --> (Load initial data into cache,Validate configuration, data base connections , Start background tasks , Start resources at startup , creation of thread pool )
+Bean handles requests
+App shutting down
+@PreDestroy runs --> ( Close DB connections , Flush pending data , Clear caches , Shutdown thread pool — wait for running tasks )
+Bean destroyed
+
+In production — always use `kill -15` not `kill -9` so cleanup runs. ( so that the pre destroy works , if we use kill-9 pre destroy will not work )
+
+Spring bean lifecycle starts with component scanning — Spring finds annotated classes. Then instantiation — constructor is called with dependencies. For field injection, dependencies are set after the constructor. Then @PostConstruct runs — this is where initialization logic goes because all dependencies are guaranteed to be ready. The bean then lives in the ApplicationContext handling requests. On shutdown, Spring calls @PreDestroy giving the bean a chance to release resources — close connections, flush data, shutdown thread pools. Finally the bean is destroyed and removed from context.
+
+Imagine your app has 200 services
+
+BookService          → used on every request ✅ create at startup
+UserService          → used on every request ✅ create at startup
+BorrowService        → used on every request ✅ create at startup
+ReportService        → used ONCE a month by admin ❌ why create at startup?
+MLRecommendationService → connects to ML server, loads 500MB model ❌
+PdfGenerationService → heavy library, slow to initialize ❌
+ArchiveService       → used only for data migration, rarely ❌
+
+App startup:
+→ Creates ALL 200 services
+→ Including ReportService, MLService, PdfService, ArchiveService
+→ Startup takes 45 seconds
+→ Uses 2GB RAM from the start
+→ Even at 3am when nobody is using the app
+
+This is wasteful. Those heavy services could wait.
+@Lazy — Create Only When First Needed
+
+@Service
+@Lazy
+public class ReportService {
+    public ReportService() {
+        System.out.println("ReportService created"); // prints on first use
+    }
+}
+
+How @Lazy Works Internally — The Proxy
+When you inject a @Lazy bean somewhere:
+
+@Service
+public class AdminDashboard {
+
+    private final ReportService reportService;
+
+    public AdminDashboard(@Lazy ReportService reportService) {
+        this.reportService = reportService;
+        // reportService is NOT the real ReportService here
+        // It's a PROXY — a lightweight placeholder
+    }
+
+    public void generateReport() {
+        reportService.generate(); // ← FIRST CALL to proxy
+        // Proxy thinks: "Someone called me!"
+        // Proxy creates the REAL ReportService NOW
+        // Delegates the call to real service
+        // From this point → proxy always uses real service
+    }
+}
+
+Two Ways to Use @Lazy
+
+Way 1 — On the Bean Itself:
+
+// Affects ALL injection points of this bean
+@Service
+@Lazy  // lazy everywhere this bean is injected
+public class HeavyMLService {
+    // Created only when first actually used
+}
+
+Way 2 — On the Injection Point:
+
+// Affects only THIS specific injection
+@Service
+public class BookController {
+
+    private final BookService bookService;       // eager — created at startup
+    private final ReportService reportService;  // lazy — created on first use
+
+    public BookController(
+            BookService bookService,
+            @Lazy ReportService reportService) { // lazy only here
+        this.bookService = bookService;
+        this.reportService = reportService;
+    }
+}
+
+@Lazy as Circular Dependency Fix
+
+// ServiceA needs ServiceB
+// ServiceB needs ServiceA
+// Spring cannot create either → deadlock
+
+// @Lazy breaks the chain:
+@Service
+public class ServiceA {
+    public ServiceA(@Lazy ServiceB serviceB) {
+        // Spring gives ServiceA a PROXY of ServiceB
+        // Proxy is lightweight → ServiceA created successfully ✅
+        // Real ServiceB created on first method call
+    }
+}
+
+@Service
+public class ServiceB {
+    public ServiceB(ServiceA serviceA) {
+        // ServiceA already exists → inject it ✅
+    }
+}
+
+
+@Lazy delays bean creation until the first time it's actually needed. By default Spring creates all singleton beans eagerly at startup. For heavy or rarely-used services this wastes startup time and memory. With @Lazy, Spring injects a lightweight proxy at startup instead of the real bean. When the first method is called on the proxy, the real bean is created and the call is delegated. After that it behaves like a normal singleton. @Lazy is also used to break circular dependencies — the proxy injection allows one side of the cycle to be created without needing the other side to exist yet.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

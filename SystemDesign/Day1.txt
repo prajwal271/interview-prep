@@ -1,0 +1,485 @@
+System design is deciding how to build software that serves millions of users reliably, when one machine is no longer enough. Everything — load balancers, sharding, caching, queues — exists because of one fact: a single server has limits (CPU, RAM, disk, network), and real systems outgrow them.
+
+A Java analogy you'll feel immediately: You've written multithreaded code. Inside one JVM, when one thread can't handle the work, you create a thread pool and distribute tasks. System design is the same idea one level up — when one server can't handle the traffic, you create a pool of servers and distribute requests. Many concepts map directly: a load balancer is like your ExecutorService dispatching tasks; a message queue is like a BlockingQueue between producer and consumer threads — just spread across machines and networks.
+
+Requirement gathering — do you ask what the system must do and at what scale before jumping to boxes and arrows? 
+Trade-off thinking — there is no "correct" design. Every choice costs something. SQL gives you consistency but sharding pain; NoSQL scales easily but weakens transactions. Interviewers want to hear "I'd choose X because... but the downside is...
+Structured communication — can you go from vague ("design WhatsApp") to a concrete architecture in 45 minutes without getting lost?
+Depth on demand — when they say "how exactly does your cache handle stale data?", can you zoom in?
+
+System design is about architecting software that can serve large scale — millions of users, high traffic, big data — reliably, which a single machine cannot handle alone.
+The word "reliably" matters. It's not just about handling scale, it's about staying up when machines crash, networks fail, and traffic spikes. Scale + reliability = the two pillars.
+
+Part 2: The Journey of a Request — DNS, HTTP, and What Actually Happens
+Every system design diagram starts with a client talking to a server. You must be able to narrate this journey fluently.
+
+DNS (Domain Name System) is basically the phonebook of the internet — it translates human-readable domain names into IP addresses that computers actually use to talk to each other. The problem it solves: When you type app.simplifyqa.ai into a browser, your computer has no idea where that server is. Networks route traffic by IP address (like 104.26.7.23), not names. DNS does that name → IP lookup for you.
+How a lookup works (simplified):
+
+You request app.simplifyqa.ai
+Your machine first checks its local cache (and the hosts file)
+If not cached, it asks a DNS resolver (usually your ISP's, or a public one like Google's 8.8.8.8 or Cloudflare's 1.1.1.1)
+The resolver walks the hierarchy: root servers → .ai TLD servers → the authoritative nameserver for simplifyqa.ai
+The authoritative server answers with the IP
+The answer gets cached along the way (controlled by a TTL, time-to-live) so repeat lookups are instant
+
+Recognized straightforward system information request
+Here are the go-to commands, depending on what info you want:
+
+Quick all-in-one overview:
+
+bash
+hostnamectl
+Shows hostname, OS, kernel version, architecture, virtualization type.
+
+CPU:
+
+bash
+lscpu
+Cores, threads, model name, architecture, clock speed.
+
+Memory:
+
+bash
+free -h
+Total/used/free RAM and swap in human-readable units.
+
+Disk:
+
+bash
+df -h          # disk usage per filesystem
+lsblk          # block devices and partitions layout
+OS/distro details:
+
+bash
+cat /etc/os-release
+uname -a       # kernel version + architecture
+Everything in one detailed dump (hardware):
+
+bash
+sudo lshw -short     # summarized hardware list
+or install inxi for a nicely formatted report:
+
+bash
+sudo apt install inxi -y
+inxi -Fxz
+Live resource usage:
+
+bash
+top        # or htop if installed — CPU/memory per process
+For your Docker server specifically, a useful combo to see if it can handle more containers:
+
+bash
+free -h && df -h / && nproc && docker system df
+That gives you RAM, disk space, CPU count, and how much space Docker images/containers are consuming, all in one shot.
+
+What is dns
+
+
+Opted for straightforward explanation over unnecessary complexity
+Opted for straightforward explanation over unnecessary complexity
+DNS (Domain Name System) is basically the phonebook of the internet — it translates human-readable domain names into IP addresses that computers actually use to talk to each other.
+
+The problem it solves: When you type app.simplifyqa.ai into a browser, your computer has no idea where that server is. Networks route traffic by IP address (like 104.26.7.23), not names. DNS does that name → IP lookup for you.
+
+How a lookup works (simplified):
+
+You request app.simplifyqa.ai
+Your machine first checks its local cache (and the hosts file)
+If not cached, it asks a DNS resolver (usually your ISP's, or a public one like Google's 8.8.8.8 or Cloudflare's 1.1.1.1)
+The resolver walks the hierarchy: root servers → .ai TLD servers → the authoritative nameserver for simplifyqa.ai
+The authoritative server answers with the IP
+The answer gets cached along the way (controlled by a TTL, time-to-live) so repeat lookups are instant
+Common record types you'll encounter:
+
+A — maps a name to an IPv4 address
+AAAA — maps to an IPv6 address
+CNAME — an alias pointing one name at another name
+MX — mail server for the domain
+TXT — arbitrary text, used for verification, SPF, etc.
+Try it yourself on your Linux server or in cmd:
+
+bash
+nslookup app.simplifyqa.ai
+or on Linux, the more detailed:
+
+bash
+dig app.simplifyqa.ai
+Why it matters in your world: when your Docker container pulls from registry.devopsark.com or the agent connects to app.simplifyqa.ai, DNS resolution happens first. A lot of "connection failed" issues in containers are actually DNS failures — which is why docker run has a --dns flag to override which resolver a container uses, and why "it works on the host but not in the container" often traces back to DNS config.
+
+C:\Users\prajwal.k>nslookup app.simplifyqa.ai
+1.7.168.192.in-addr.arpa
+        primary name server = a.gtld-servers.net
+        responsible mail addr = nstld.verisign-grs.com
+        serial  = 1800
+        refresh = 1800 (30 mins)
+        retry   = 900 (15 mins)
+        expire  = 604800 (7 days)
+        default TTL = 86400 (1 day)
+Server:  UnKnown
+Address:  192.168.7.1
+Non-authoritative answer:
+Name:    k8s-simplifyqaappnewh-755825942c-1164660279.ap-southeast-1.elb.amazonaws.com
+Addresses:  18.143.222.229
+          18.142.234.20
+Aliases:  app.simplifyqa.ai
+
+If I run nslookup app.simplifyqa.ai in cmd 
+
+Deciphered DNS lookup output and field meanings
+Deciphered DNS lookup output and field meanings
+That output looks a bit messy but it worked — let me break down what you're seeing:
+
+The confusing first block (the 1.7.168.192.in-addr.arpa part with serial/refresh/retry values): that's just noise. Before doing your actual lookup, nslookup tried a reverse lookup on your own DNS server's IP (192.168.7.1 — your router, reversed into in-addr.arpa format) to display its name. Your router has no reverse DNS entry, so it printed that SOA record instead and labeled the server "UnKnown". Harmless, ignore it.
+
+The part that matters:
+
+Non-authoritative answer:
+Name:    k8s-simplifyqaappnewh-755825942c-1164660279.ap-southeast-1.elb.amazonaws.com
+Addresses:  18.143.222.229
+            18.142.234.20
+Aliases:  app.simplifyqa.ai
+Reading this tells you quite a lot about SimplifyQA's infrastructure:
+
+app.simplifyqa.ai is a CNAME (alias) — it doesn't point straight to an IP. It points to another name.
+That name — k8s-...elb.amazonaws.com — is an AWS Elastic Load Balancer, and the k8s prefix tells you it's fronting a Kubernetes cluster (the app runs as pods behind it).
+ap-southeast-1 is AWS's Singapore region — that's where the platform is hosted, which explains your latency from Bangalore being decent.
+Two IP addresses (18.143.222.229 and 18.142.234.20) — the load balancer lives in multiple availability zones for redundancy. Your traffic can land on either; if one AZ dies, DNS still resolves to the healthy one.
+"Non-authoritative answer" just means your router answered from cache rather than asking simplifyqa.ai's nameservers directly — completely normal.
+So the resolution chain your agent container follows is: app.simplifyqa.ai → CNAME → AWS ELB in Singapore → one of two IPs → Kubernetes ingress → the actual app pods.
+
+One practical note: because it's a load balancer, those IPs can change over time — never hardcode them (in a hosts file, firewall rule, etc.). Always use the domain name and let DNS do its job.
+
+Step by step — user types api.myapp.com/orders (or your app calls it):
+
+Step 1 — DNS resolution :
+	Computers route by IP address, not names. So the client first asks DNS (Domain Name System): "what's the IP for api.myapp.com?" DNS is basically a giant, globally distributed HashMap<String, IP> — name in, IP out. 
+Say you type api.myapp.com in your browser. Your computer needs the IP. It checks a series of places, nearest and fastest first, only going further if it doesn't find the answer:
+1. Browser cache 2. OS cache — If the browser doesn't have it, your operating system (Windows/Mac) keeps its own cache. Maybe another app looked it up recently. 
+3. Your ISP's resolver — Still not found? Your machine asks a DNS server run by your internet provider (Jio, Airtel, or a public one like Google's 8.8.8.8). This server answers DNS queries for thousands of customers, so popular domains are almost always in its cache. This is where most real lookups end.
+4. The global hierarchy — Suppose the domain is brand new or obscure and even the ISP doesn't know it. Now the resolver climbs a tree of servers, narrowing down like a postal address:
+Root server where everything is stored
+It asks a root server: "Who handles .com domains?" → Root replies: "Ask the .com servers, here's their address."
+It asks the .com server: "Who handles myapp.com?" → Reply: "Ask myapp's nameserver, here's its address."
+It asks myapp.com's nameserver (the authoritative one — the actual owner of the record): "What's the IP of api.myapp.com?" → Reply: "52.66.10.5". Final answer.
+
+That 4-step climb takes maybe 100–200ms. Doing it for every request would be terrible. So every answer gets cached at every level it passed through — browser, OS, ISP resolver all remember: api.myapp.com → 52.66.10.5.
+
+But servers change IPs sometimes. If caches remembered forever, they'd hand out dead addresses. So every DNS record carries a TTL (time-to-live) — an expiry, e.g. 300 seconds. "You may reuse this answer for 5 minutes; after that, ask again."
+Long TTL (e.g. 24 hours) → fewer lookups, faster, but if you change your server's IP, users keep hitting the old one for up to a day.
+Short TTL (e.g. 60 seconds) → changes propagate fast, but more lookup traffic.
+
+GeoDNS: Smarter — DNS looks at where the query is coming from and answers accordingly. A user in Bangalore asks for api.myapp.com → gets the IP of your Mumbai server. A user in New York asks → gets your Virginia server. Same name, different answers by geography. Remember from Part 2: India↔US round trip is ~200ms. GeoDNS eliminates that by routing everyone to the nearest region. This is exactly how Google/Netflix feel fast everywhere.
+
+If you are migrating to a fresh new uri you should reduce your TTL because
+
+Remember what TTL means: it's a promise to every cache in the world — "you may reuse this answer for 24 hours without asking me again."
+So right now, thousands of browser caches, OS caches, and ISP resolvers across the world are holding api.myapp.com → 1.1.1.1, each with up to 24 hours left on their timer.
+Now you flip the switch. You update your DNS record to 2.2.2.2 and shut down the old server. What happens?
+
+What is the limitation of Round robin
+Limitation 1: No Health Awareness (the big one) it does not know whether an ip is up or down
+Limitation 2: No Load Awareness if does not know the load handled by a particular ip
+Limitation 3: Caching Breaks the Rotation
+Limitation 4: Slow to React to Any Change
+
+
+Step 2 — TCP connection :
+	Why a "Connection" Is Needed at All The internet is unreliable at its core. Data travels as small packets, and packets can get lost, arrive out of order, or arrive duplicated. If you just fired your API request into the void as raw packets, you'd have no guarantee it arrived, or arrived intact.
+TCP (Transmission Control Protocol) is the layer that fixes this. It sits between your app and the raw network and guarantees: everything you send arrives, in order, exactly once — or you get an error. It does this with sequence numbers, acknowledgments, and retransmissions of lost packets.
+
+The 3-Way Handshake — Opening the Pipe
+Before data flows, both sides must agree "we're connected now" and sync up their counters. That takes three messages:
+
+SYN — Client → Server: "I want to connect, here's my starting sequence number." (SYN = synchronize)
+SYN-ACK — Server → Client: "Acknowledged. I'm in, here's my starting sequence number."
+ACK — Client → Server: "Acknowledged. Let's go."
+
+TLS Handshake — Encrypting the Pipe (HTTPS)
+
+The server proves its identity with a certificate ("I really am api.myapp.com, signed by a trusted authority" — this prevents impostor servers).
+Client and server agree on encryption keys that only they know. After this, everything in the pipe is encrypted gibberish to outsiders. So an HTTPS connection = TCP handshake + TLS handshake before your first byte of actual request.
+
+The Cost — And Why We Reuse Connections
+Here's the design-relevant part. Each handshake message is a network round trip. Say client-to-server round trip is 50ms:
+
+TCP handshake: ~1 round trip → 50ms
+TLS handshake: ~1–2 more round trips → 50–100ms
+Total: ~100–150ms of pure setup before your request even leaves.
+
+If your API response itself takes 20ms, you'd be spending 150ms on ceremony for 20ms of work. And doing this for every single request would be madness — like hanging up the phone after every sentence and redialing to say the next one.
+
+HTTP keep-alive: the browser keeps the TCP+TLS connection open after a response and sends the next requests through the same pipe. Handshake cost is paid once, amortized over dozens of requests.
+Connection pooling: the same idea, server-side. You know this one intimately — JDBC connection pools (HikariCP). Opening a database connection is expensive (TCP handshake + DB authentication + session setup, easily 50–100ms). So instead of opening a fresh connection per query, HikariCP opens, say, 10 connections at startup and keeps them alive. Each query borrows a connection from the pool, uses it for 2ms, and returns it. Exactly the same pattern exists between your microservices — HTTP clients like RestTemplate/OkHttp keep pools of open connections to services they call frequently.
+
+Before any HTTP data flows, the client does a TCP 3-way handshake to establish a reliable connection, plus a TLS handshake for HTTPS. These cost network round trips, so real systems amortize them via keep-alive and connection pooling — same rationale as a JDBC pool
+
+TCP makes the pipe reliable. TLS makes the pipe private and trusted.
+TCP (Transmission Control Protocol)
+TLS stands for Transport Layer Security.
+
+Step 3 — HTTP request. Over that pipe, the client sends the HTTP request: method (GET/POST/PUT/DELETE), path (/orders), headers (auth token, content-type), and body. You know this world well from Spring — @GetMapping, @PostMapping. One property to internalize now because it becomes huge later: HTTP is stateless. Each request is self-contained; the server doesn't inherently remember the previous request. (That's why we carry JWT tokens or session IDs on every call.)
+
+Step 4 — Server processes and responds. The request lands on your server (in real systems, it first hits a load balancer — that's Part 4), your Spring controller runs, hits the database, returns JSON with a status code (200, 404, 500...).
+The numbers that make this real (interviewers love that you know rough latencies):
+
+
+Part 3: Vertical vs Horizontal Scaling
+The scenario every design starts from: Your Spring Boot app runs on one server. Traffic grows. Response times climb, CPU sits at 90%+, requests start timing out. The machine is saturated. You have exactly two ways out.
+Option 1: Vertical Scaling ("scale UP")
+Make the machine bigger. 8 cores → 32 cores, 16GB RAM → 128GB, HDD → NVMe SSD. Same architecture, same code, just a beefier box.
+Why it's attractive:
+
+Zero code changes. Your app doesn't know or care that the hardware got bigger.
+No distributed-system problems. One machine = no load balancing, no data sync between nodes, no network calls between components. Simplicity is genuinely valuable.
+Why it fails eventually:
+There's a ceiling. You can't buy a 10,000-core machine. At some point, no bigger box exists — and near the top, price grows much faster than power (a 2x-powerful machine often costs 4x+).
+Single point of failure (SPOF). One machine, however mighty, is still one machine. It crashes, your entire product is down. 100% of your availability rides on one motherboard.
+Downtime to upgrade. Swapping to bigger hardware usually means shutting down.
+
+Option 2: Horizontal Scaling ("scale OUT")
+Add more machines. Instead of one 32-core monster, run your app on 4 normal 8-core servers, with a load balancer spreading requests across them.
+Why it wins at scale:
+
+No practical ceiling. Need more capacity? Add server #5, #6... #500. Google runs on millions of commodity machines, not one magic supercomputer.
+Fault tolerance built in. One of your 4 servers dies → the other 3 absorb the traffic. Users barely notice. Failure goes from catastrophe to Tuesday.
+Elasticity. Add machines for the sale-day spike, remove them after. Cloud makes this a button click (auto-scaling).
+Cheap commodity hardware instead of exotic top-end boxes.
+
+The price you pay — and this is the honest trade-off talk interviewers want:
+You now have a distributed system. Requests must be distributed (→ load balancer, Part 4).
+State becomes a problem. If user Prajwal's session lives in server 1's memory and his next request lands on server 3 — server 3 has no idea who he is. (This is exactly Part 6: stateless vs stateful.)
+Complexity everywhere: deployment to N machines, logs scattered across N machines, N machines to monitor.
+
+State — "Server 3 doesn't know who Prajwal is" → Externalize the State
+First, see the problem sharply. In a single-server world, your app might do this after login:
+session.setAttribute("user", prajwal);  // stored in THIS server's RAM
+
+Request 2 lands on a different server → different RAM → no session → "please log in again." Broken.
+The fix is a principle you'll use all week: servers must not keep user state in their own memory. Move state OUT of the servers into a shared place. Three standard ways:
+
+Solution A — Shared session store (Redis). Instead of RAM, sessions live in a central fast store all servers can reach — almost always Redis (an in-memory key-value database, sub-millisecond reads; you've used it). Login on server 1 → server 1 writes session:abc123 → {user: prajwal} to Redis. Next request lands on server 3 → server 3 reads session:abc123 from Redis → knows exactly who you are. Any server can serve any request, because the truth lives in one shared place.
+Solution B — Don't store sessions at all: JWT tokens. On login, the server issues a signed token
+
+Your Java-world analogy: vertical = optimizing one thread to run faster; horizontal = spawning more threads in a pool. And just like multithreading introduced synchronization headaches you never had in single-threaded code, multi-machine introduces coordination headaches you never had on one server. Same trade-off, one level up.
+What Real Systems Do (the senior answer)
+Not either/or — both, in sequence:
+
+Start on one reasonable machine. Maybe scale vertically once or twice — it's the cheapest engineering move (zero code changes).
+When you approach the ceiling or can't tolerate SPOF anymore → go horizontal.
+Even after going horizontal, pick reasonably sized nodes (vertical baseline) and add more of them (horizontal growth).
+
+Interview soundbite: "I'd start vertical because it's zero-complexity, but it has a hardware ceiling and is a single point of failure — so for real scale and availability, the system must be designed to scale horizontally, which means stateless services behind a load balancer."
+
+Vertical scaling asks: "how do I prevent failure?" Horizontal scaling asks: "how do I survive failure?" — and the second question is the only winnable one, because at scale, failure is not an if, it's a when. With 100 servers, something is failing somewhere basically every week. Good systems don't avoid failure; they make failure boring
+
+Part 4: Load Balancers 
+
+LB health-checks every server (pings something like /health every few seconds). Two or three failed checks in a row → server marked unhealthy → traffic instantly redistributed to the rest. When it recovers and passes checks again, it rejoins automatically. This is what round-robin DNS could never do.
+
+How the LB Picks a Server: Routing Algorithms
+Interviewers often ask "which algorithm would you use?" Know these four:
+1. Round robin — rotate through servers in order: 1, 2, 3, 1, 2, 3... Simple, fair if all servers are identical and all requests are similar. Default choice.
+2. Weighted round robin — servers get proportional shares. Server A is twice as powerful → give it weight 2, it gets 2 of every 3 requests. Use when your machines aren't identical.
+3. Least connections — send each new request to the server with the fewest active connections right now. Why this matters: round robin counts requests, but requests aren't equal — one user's "generate annual report" holds a connection for 30 seconds while another's "get profile" takes 20ms. Least connections adapts to actual busyness. Best choice when request durations vary a lot.
+4. IP hash — hash(client IP) % server_count decides the server. Same client → always the same server. This is how sticky sessions are implemented (remember Part 3's crutch). Deterministic, but uneven if a few IPs send heavy traffic — and note the connection to your Java world: it's literally HashMap bucket logic applied to servers.
+
+How deep does the LB look before deciding where to send the request?
+L4 looks at the envelope — the address only (IP + port).
+L7 opens the envelope and reads the letter — the URL, headers, cookies.
+
+L4 — The Postal Sorter
+It sees: "packets coming from IP 1.2.3.4 → destined for port 443." It picks a server, forwards the packets, done. It has no idea whether the request is /login or /download-video.
+
+L7 — The Receptionist Who Reads
+It sees the actual HTTP request: GET /api/orders, Authorization: Bearer..., User-Agent: Android. So it can decide based on meaning:
+
+You already know an L7 balancer: Spring Cloud Gateway. It reads the path and routes to the right microservice. That's L7 by definition.
+
+/api/orders/* → order-service servers; /api/videos/* → video-service servers (this is essentially what Spring Cloud Gateway does — you've met an L7 balancer already!)
+Route by header: mobile app traffic to one pool, web to another
+Terminate TLS (decrypt once at the LB, so backend servers skip that work)
+Reject malformed/malicious requests before they ever touch your servers
+
+Cost: reading and parsing every request is more work per request than blind packet forwarding, so L7 is slower per-connection than L4 — but for typical applications the flexibility is worth it.
+Real names to drop: Nginx, HAProxy (software LBs, both can do L4 and L7), AWS ALB (L7) and AWS NLB (L4).
+
+Soundbite: "L4 balances on IP/port — fast, content-blind. L7 understands HTTP, so it can route by path or headers, terminate TLS, and act as an API gateway. Most application architectures use L7 at the edge; L4 where raw throughput matters."
+
+The Question You Should Ask Yourself: Isn't the LB Now a SPOF?
+Yes — sharp catch if you thought it. We removed the single point of failure from the servers and created a new one in front of them. One LB dies → everything's down.
+Standard fix: run two load balancers in an active–passive pair. The active LB handles all traffic; the passive one sits idle, exchanging heartbeats with it ("you alive?" every second). If heartbeats stop, the passive LB takes over the same IP address (a "floating IP" / virtual IP) within seconds — clients never notice, DNS never changes. (Active–active, where both work simultaneously, also exists.) In the cloud, AWS/GCP load balancers are already internally redundant — you get this for free, which is worth saying in interviews.
+
+
+Your interviewer says "route all /payments requests to a separate, more secure server pool." L4 or L7, and why?
+L7 looks into your url as well
+
+"The load balancer is a single point of failure" — your response?
+The answer: "Yes — so you never run just one. You run a redundant pair with automatic failover, and the failover is invisible to clients because the IP moves, not the DNS record."
+
+Active LB — handles 100% of traffic. It holds the public IP (say 52.66.10.5) that DNS points to.
+Passive LB — idle, fully configured, doing nothing but exchanging heartbeats with the active one ("you alive?" every second).
+
+When the active LB dies, heartbeats stop. Within a couple of seconds, the passive LB claims the same IP address — this is the floating IP (a.k.a. virtual IP / VIP). The public IP hasn't changed; the machine behind it has. Clients keep sending to 52.66.10.5 and are now served by the passive LB, which has been promoted to active.
+
+Part 5: Latency, Throughput, and Availability
+
+Latency vs Throughput — the Highway Analogy
+Latency = how long one request takes. The delay from "I asked" to "I got my answer." Measured in milliseconds. Lower is better.
+Throughput = how many requests you handle per second. Total volume. Measured in requests/sec (QPS/RPS). Higher is better.
+
+Why "Average Latency" Is a Lie — Percentiles (p50, p95, p99)
+Imagine 100 requests. 99 of them take 10ms, but 1 takes 5000ms (hit a cold cache, slow query, GC pause). The average is ~60ms — which describes nobody's actual experience. It hides the one user who waited 5 seconds.
+
+So we use percentiles instead:
+p50 (median) — half of requests are faster than this. The "typical" experience.
+p95 — 95% are faster; the slowest 5% are worse.
+p99 — 99% are faster; only the worst 1% exceed it.
+p99.9 — the worst 1 in 1000.
+
+ "I track percentiles, not averages — averages hide outliers. p99 tells me the experience of the unluckiest 1%, and at scale that tail dominates real user experience, especially when one page fans out into many backend calls."
+
+
+Availability	Nickname		Downtime / year		Downtime / day
+99%		two nines		~3.65 days		~14.4 min
+99.9%		three nines		~8.76 hours		~1.44 min
+99.99%		four nines		~52.6 min		~8.6 sec
+99.999%		five nines		~5.26 min		~0.86 sec
+
+Availability — the "Nines" (see the table above)
+Availability = the percentage of time your system is up and correctly serving requests. It's measured in nines, and the table above shows why each extra nine is a big deal.
+
+The non-obvious lesson from that table: each additional nine is ~10× harder and cuts downtime by ~10×. Going 99% → 99.9% saves you 3+ days a year. Going 99.99% → 99.999% is the difference between 52 minutes and 5 minutes of yearly downtime — and getting there costs enormously more (multi-region, aggressive redundancy, automated failover everywhere).
+
+The trade-off interviewers want you to voice: don't chase five nines by default. "What availability do we actually need?" is the senior question. A banking transaction ledger needs four+ nines. An internal analytics dashboard is fine at three. Every nine costs real money and complexity — you buy only what the business needs.
+
+SLA (Service Level Agreement) — the availability you promise customers contractually (e.g. "99.9% uptime or we refund you").
+SLO / SLI — your internal target (SLO) and the actual measured number (SLI). Companies set SLOs slightly stricter than their SLA so they have a safety buffer.
+Service Level Objective : target you set for an SLI — the goal you're committing to over some window of time. It answers "how good do we need to be?" For example, "99.9% of requests should succeed, measured over a rolling 28-day window." The SLO is essentially a line drawn on top of your SLI: as long as the measured SLI stays above the objective, you're meeting your reliability goal.
+Service Level Indicator :  is a measurement — a specific, quantified metric of how your service is actually performing. It answers "how are we doing right now?" An SLI is usually expressed as a ratio of good events to total events.
+
+Redundancy means having more than what is necessary, usually serving as a backup.
+Remember from Part 3: two 99% servers in parallel gave ~99.99% because the system is only down when both fail at once (1% × 1% = 0.01% down). That's the mathematical reason redundancy buys availability — independent failures multiply, so parallel components make the combined failure probability tiny.
+
+One caution to mention: this multiplication only holds if failures are independent. If both servers share the same power supply, same rack, same data center — a single event takes out both, and your "99.99%" collapses to 99%. That's why serious redundancy spreads across availability zones (separate power/network/cooling). Saying this shows you understand redundancy isn't just "add a copy," it's "add an independent copy."
+
+Part 6: Stateless vs Stateful Services
+
+State = any information the server remembers between requests. Examples: who's logged in, what's in your shopping cart, how far through a multi-step wizard you are, a counter, an uploaded file held in memory.
+Stateful — State Lives Inside the Server
+The server stores state in its own local memory or disk. Classic example — the old-school HTTP session:
+
+The deeper problems with stateful servers:
+Can't freely load-balance
+Server death = data loss — Server 1 crashes, every session in its RAM is gone. All those users are logged out.
+Can't scale elastically — you can't just add Server 5, because it starts empty with none of the existing state; and you can't remove a server without losing what it holds
+Uneven load — sticky sessions pin heavy users to one box
+
+The servers have become pets — each one special, named, cared for, irreplaceable. That's the enemy of scale.
+
+Stateless — State Lives Outside the Server
+A stateless server keeps no user state in its own memory between requests. Each request carries or points to everything needed to handle it, and any shared state lives in an external store (Redis, database) that all servers reach.
+Now — as the diagram shows — request 2 can land on any server. Every server is identical and can read the session from Redis (or verify the JWT). It doesn't matter who serves you.
+
+Advantages
+Any server handles any request 
+Server death is a non-event 
+Elastic scaling is trivial → add Server 5, it instantly starts serving (nothing to "catch up" on); remove servers freely.
+Rolling deploys are safe → take any server down to upgrade; no state lost.
+
+The servers are now cattle, not pets — identical, numbered, disposable. Any one can die or be replaced and nothing of value is lost. This is the property that makes "just add more machines" work.
+
+Push state out of the servers and into a shared store, so servers become stateless, identical, and disposable.
+the state didn't vanish, it moved to Redis/the database. Those become the stateful components. So haven't we recreated the SPOF? (Single Point of Failure )
+
+we concentrated state into a small number of purpose-built, heavily-redundant systems instead of smearing it across every app server. Databases and Redis are designed to be stateful safely — they have replication, failover, and persistence built in
+It's far easier to make two or three specialized data stores highly available than to make fifty app servers each safely hold state. So the pattern is really:
+Make the many app servers stateless and disposable; concentrate state into a few systems built to manage it reliably.
+
+JWT (Part 3) is the purest stateless move: state (your identity) travels inside the request as a signed token, so there's no lookup anywhere — not even Redis. That's why it dominates microservices.
+Redis sessions (Part 3) keep state external but shared — one lookup, any server.
+Your microservices should each be stateless so Kubernetes can scale/restart/reschedule them freely — which is exactly why you containerize them.
+
+ "I design services to be stateless — no session state in server memory. State goes into a shared store like Redis, or travels with the request as a JWT. This makes every server identical and disposable, so the load balancer can route freely, crashed servers cause no data loss, and I can scale horizontally just by adding instances. The trade-off is that state concentrates in the data layer, which then must be made highly available."
+
+Part 7: Back-of-the-Envelope Estimation
+QPS stands for Queries Per Second 
+
+Every estimation reduces to some combination of:
+QPS (queries/sec) — how much traffic? → drives how many servers, whether you shard the DB.
+Storage — how much data over time? → drives DB choice, sharding, archival.
+Bandwidth — bytes/sec in and out? → drives CDN, network capacity.
+
+Worked Example — Twitter-Style Feed (do this with me)
+Given: 100 million daily active users. Each user posts 2 tweets/day and reads their feed 20 times/day. A tweet averages 300 bytes.
+Step 1 — Write QPS (tweets/sec):
+
+Total tweets/day = 100M users × 2 = 200M tweets/day
+Per second = 200,000,000 ÷ 100,000 = 2,000 writes/sec
+
+Step 2 — Read QPS (feed loads/sec):
+
+Total reads/day = 100M × 20 = 2 billion reads/day
+Per second = 2,000,000,000 ÷ 100,000 = 20,000 reads/sec
+
+Step 3 — Observe the read:write ratio. 20,000 : 2,000 = 10:1, read-heavy. This is one of the most important outputs — it immediately justifies a design decision: "reads dominate 10:1, so I'll add a cache (Redis) and read replicas to serve reads, and keep writes going to the primary." You've now motivated caching with a number, not a hunch.
+Step 4 — Storage (per year):
+
+Bytes/day = 200M tweets × 300 bytes = 60 billion bytes = 60 GB/day
+Per year = 60 GB × 365 ≈ ~22 TB/year (just text!)
+The lesson: "22 TB/year of text alone won't fit or scale on one machine's disk, so I'll shard the database and plan archival for old tweets." Another design choice, justified by a number.
+
+Step 5 — Bandwidth (outgoing, the heavy direction):
+
+Reads serve tweets out: 20,000 reads/sec, and each feed load returns, say, ~20 tweets × 300 bytes ≈ 6 KB
+Outgoing ≈ 20,000 × 6 KB = 120 MB/sec served to users → "significant egress, so I'll put a CDN / caching layer in front to offload it."
+
+Look at what just happened: from one starting number (100M users), you derived traffic, storage, and bandwidth — and each number pointed at a specific architectural decision (cache, replicas, sharding, CDN). That is what the estimation phase is for.
+The Read-Heavy vs Write-Heavy Insight
+Always compute the read:write ratio — it's one of the most design-shaping numbers:
+
+Read-heavy (like the 10:1 above — Twitter, news, e-commerce browsing) → optimize reads: caching, read replicas, CDN. Reads are easy to scale (just copy the data to more places).
+Write-heavy (analytics ingestion, logging, IoT, metrics) → writes are harder to scale (every copy must be updated consistently) → sharding, write-optimized stores, message queues to buffer bursts.
+
+Saying "this system is read-heavy at roughly 10:1, so I'll lean on caching and replicas" early in an interview signals you think quantitatively.
+
+Two Pro Habits
+
+State assumptions out loud and round hard. "Let's say 100M users, 2 posts each — I'll round to make the math clean." Interviewers want to see the assumption; a wrong-but-reasoned assumption beats a memorized number.
+Add ~20% headroom and remember traffic isn't uniform. Real traffic has peaks (lunchtime, evenings) often 2–3× the average. Mention it: "average is 20K QPS, but I'd provision for a peak of ~2–3× that." Shows operational maturity.
+
+"I convert daily activity to per-second using one day ≈ 100,000 seconds. From users × actions/day I get QPS, then storage and bandwidth from the payload size. The read:write ratio tells me whether to optimize with caching and replicas or with sharding and write buffering — and I provision for peak, not average."
+
+A photo-sharing app has 50 million daily active users. Each uploads 1 photo/day and views 50 photos/day. Average photo = 2 MB.
+
+Upload QPS (writes/sec)?
+View QPS (reads/sec)?
+Storage added per day?
+Read:write ratio — and what one design decision does it justify?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

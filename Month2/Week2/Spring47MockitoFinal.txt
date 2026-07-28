@@ -1,0 +1,172 @@
+Verification + argument matchers + ArgumentCaptor + void stubbing
+
+Every Mockito test does one or both of
+1) Stubbing — control inputs: "when called, return this." Set up before the action.
+2) Verification — check interactions: "was this called, correctly?" Checked after the action.
+
+Stubbing is when(...).thenReturn(...) at the top. Verification is verify(...) at the bottom. They bracket the "Act" step.
+
+verify() — did my code call the dependency correctly?
+some things have no return value to assert on — you can only prove them by checking the interaction
+Example: when an order is confirmed, the service must call inventory.reduce(...). There's no output that proves it — you verify the call happened:
+
+@Test
+void placeOrder_whenConfirmed_reducesInventory() {
+    when(inventory.isAvailable("book", 2)).thenReturn(true);
+    when(payment.charge("book", 2)).thenReturn(true);
+
+    service.placeOrder("book", 2);
+
+    verify(inventory).reduce("book", 2);   // ASSERT: reduce() was called once, with exactly these args
+}
+
+verify(inventory).reduce("book", 2) means: "check that reduce was called on the inventory mock, exactly once, with arguments "book" and 2." If it wasn't called, or was called with different args, or called twice → the test fails.
+
+Verification modes — how many times?
+
+verify(inventory, times(1)).reduce("book", 2);    // exactly once (same as default)
+verify(inventory, times(3)).reduce(any(), anyInt()); // exactly 3 times
+verify(payment, never()).charge(any(), anyInt());   // ZERO times — proves it was NOT called
+verify(inventory, atLeastOnce()).isAvailable(any(), anyInt());
+verify(inventory, atLeast(2)).isAvailable(any(), anyInt());   // 2 or more
+verify(inventory, atMost(3)).isAvailable(any(), anyInt());    // 3 or fewer
+
+When do you use verify instead of an assertion on the return value?
+When the behaviour I care about is an interaction with a dependency, not a return value — like confirming a repository's save was called, or that a payment was NOT charged on an invalid order. assertEquals checks state/output; verify checks that the right collaborators were called the right way.
+
+verifyNoInteractions / verifyNoMoreInteractions / InOrder
+
+verifyNoInteractions(payment);          // the payment mock was NEVER touched at all (any method)
+verifyNoMoreInteractions(inventory);    // beyond what I already verified, nothing else happened on inventory
+
+verifyNoInteractions(mock) — that mock had zero calls of any kind. (Good for "we bailed out early and never touched payment.")
+verifyNoMoreInteractions(mock) — after your verify calls, asserts there were no other unverified calls. Use cautiously — it's strict and can make tests brittle (any new call breaks them).
+
+Order verification — when sequence matters:
+InOrder order = inOrder(inventory, payment);
+order.verify(inventory).isAvailable("book", 2);   // must happen FIRST
+order.verify(payment).charge("book", 2);          // THEN this
+order.verify(inventory).reduce("book", 2);        // THEN this
+
+InOrder checks the calls happened in that relative order. Useful when correctness depends on sequence (check stock → charge → reduce, never charge before checking stock).
+
+verifyNoInteractions vs verifyNoMoreInteractions?"
+
+"verifyNoInteractions(mock) asserts the mock was never used at all. verifyNoMoreInteractions(mock) asserts that, beyond the calls I already explicitly verified, nothing else happened. I use the latter sparingly because it makes tests brittle to harmless additions
+
+
+
+Argument matchers — verifying/stubbing without exact values
+So far we passed exact arguments: reduce("book", 2). Often you don't care about the exact value — any string, any int, a value matching a condition. Matchers express that.
+
+any()->anything including null (for objects)
+anyString(), anyInt(), anyLong(), anyBoolean()->any value of that type (not null for primitives)
+anyList(), anyMap(), anyCollection()->any collection of that type
+eq(value)->exactly that value (used to mix a literal in with other matchers)
+isNull() / isNotNull()->null / non-null
+argThat(predicate)->any argument satisfying a custom condition
+
+argThat is the powerful one — custom logic:
+
+verify(repo).save(argThat(user -> user.getEmail().endsWith("@company.com")));
+// passes only if the saved user's email ends with @company.com
+
+you cannot mix matchers and raw values (top interview trap)
+
+This is the Mockito rule interviewers most love to test:
+If you use even ONE matcher in a call, then EVERY argument in that call must be a matcher. You cannot mix a raw value with a matcher.
+
+// ❌ WRONG — mixing raw "book" with matcher anyInt()
+verify(payment).charge("book", anyInt());
+// throws: InvalidUseOfMatchersException
+
+// ✅ RIGHT — wrap the raw value in eq()
+verify(payment).charge(eq("book"), anyInt());
+
+
+Matchers aren't normal values. When you call anyInt(), it doesn't return "any int" — it returns a dummy value (like 0) and, as a side effect, pushes a matcher object onto an internal stack inside Mockito. When you then call charge("book", anyInt()), Mockito sees: one argument is a raw value ("book"), and the stack has one matcher on it. It expects either zero matchers (all raw) or as many matchers as arguments (all matchers). One raw + one matcher = mismatch → Mockito can't tell which argument the stacked matcher belongs to → it throws InvalidUseOfMatchersException.
+
+Can you mix argument matchers and raw values in Mockito? What happens?
+No. If any argument uses a matcher, all arguments must use matchers, because matchers register themselves on an internal stack as a side effect rather than being real values — mixing leaves Mockito unable to map matchers to arguments and it throws InvalidUseOfMatchersException. To use a literal alongside matchers, wrap it with eq(value).
+
+any() vs anyInt() — any difference around null?
+any() (and anyString() in modern Mockito) matches null too, but the primitive matchers like anyInt()/anyBoolean() do not match null because primitives can't be null. A subtlety: in older Mockito anyString() didn't match null; current versions it does for objects.
+
+
+ArgumentCaptor — capture and inspect what a mock was called with
+Sometimes the argument is an object built inside the method, and you want to assert on its contents. verify(repo).save(...) checks that save was called, but how do you inspect the actual User object that was passed? Capture it
+
+@Test
+void register_savesUserWithCleanedEmail() {
+    UserRepository repo = mock(UserRepository.class);
+    UserService service = new UserService(repo);
+
+    service.register("Asha", "  Asha@MAIL.com  ");
+    ArgumentCaptor<User> captor = ArgumentCaptor.forClass(User.class);
+
+    // 2. capture DURING verification — captor.capture() stands in for the argument
+    verify(repo).save(captor.capture());
+
+    // 3. pull out the captured object and assert on its contents
+    User saved = captor.getValue();
+    assertEquals("asha@mail.com", saved.getEmail());   // trimmed + lowercased
+    assertEquals("Asha", saved.getName());
+}
+
+
+You can also declare it with @Captor (cleaner, with MockitoExtension):
+@Captor ArgumentCaptor<User> userCaptor;
+
+
+Captor vs argThat
+Both inspect arguments, but differently:
+
+argThat(predicate) decides match/no-match at verification time — if it doesn't match, the verify fails, but you get a poor failure message ("wanted but not invoked").
+
+ArgumentCaptor grabs the actual object so you can run rich, separate assertions on it afterward — with clear, specific failure messages ("expected asha@mail.com but was Asha@MAIL.com").
+
+What is ArgumentCaptor and when do you use it over argThat?
+
+It captures the actual argument passed to a mock so I can assert on its contents after the fact — handy when the object is constructed inside the method under test. I prefer it over argThat when I want detailed assertions and clear failure messages; argThat is better for simple inline conditions, especially as part of stubbing
+
+Stubbing void methods — doNothing / doThrow (the do* family)
+
+you can't write when(mock.voidMethod()) because a void call returns nothing to pass into when(...). For void methods (and a few other cases) Mockito provides the do* family, where the mock comes last:
+
+
+
+EmailService email = mock(EmailService.class);   // void sendEmail(String)
+
+// no-op (this is actually the default for a void mock, but explicit is clearer):
+doNothing().when(email).sendEmail(anyString());
+
+// make a void method THROW (test error handling):
+doThrow(new RuntimeException("smtp down")).when(email).sendEmail("bad@mail.com");
+
+// verify a void method was called:
+verify(email).sendEmail("good@mail.com");
+
+
+The full do* family: doReturn(x), doThrow(...), doNothing(), doAnswer(...), doCallRealMethod(). They're the alternative to the when().then() form, and they're required for void methods 
+
+How do you stub a void method?
+With the do* family — doNothing(), doThrow(...), or doAnswer(...) followed by .when(mock).method(). The standard when(mock.method()).then... form doesn't work for void methods because there's no return value to pass into when()
+
+When MUST you use doThrow instead of when().thenThrow()?
+For void methods — there's no return to feed when(). And for spies, where I'll cover that doReturn().when() avoids calling the real method during stubbing
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

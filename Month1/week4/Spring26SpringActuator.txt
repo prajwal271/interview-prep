@@ -1,0 +1,268 @@
+TOPIC 1: What is Spring Actuator and why does it exist?
+The problem: You deploy your Library API to production. It's running. But you have no idea:
+Is it actually healthy right now, or about to crash?
+How much memory is it using?
+Which endpoints are slow?
+Is the database connection still alive?
+How many requests per second is it handling?
+
+Without Actuator, you'd have to write all of this yourself — health check endpoints, metrics collectors, JVM memory readers. That's weeks of work.
+ A Spring Boot starter that gives you production-ready monitoring endpoints for free. Add one dependency, and you instantly get 15+ HTTP endpoints under /actuator/* that expose the internal state of your app.
+
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+
+hit GET /actuator — Spring lists every available endpoint.
+
+Spring Actuator is a production-monitoring module that exposes HTTP endpoints showing the internal state of a Spring Boot application — health, metrics, environment, JVM info, request mappings, and more. It's what we use to integrate with monitoring tools like Prometheus, Grafana, or Datadog in production.
+
+
+TOPIC 2: The Actuator Endpoints 
+By default, only /health and /info are exposed over HTTP for security. 
+/actuator/health — Is the app alive?
+
+GET /actuator/health
+{
+  "status": "UP",
+  "components": {
+    "db": { "status": "UP", "details": { "database": "PostgreSQL" }},
+    "diskSpace": { "status": "UP" },
+    "ping": { "status": "UP" }
+  }
+}
+
+GET /actuator/info — App metadata
+Static info you configure — version, build time, git commit. Used to verify which version is actually running in production.
+
+# Expose the info endpoint (along with health)
+management.endpoints.web.exposure.include=health,info
+# Enable environment-based info contributor (required for info.app.* properties to show up)
+management.info.env.enabled=true
+info.app.name: Library Management System
+info.app.version: 1.0.0-SNAPSHOT
+
+
+{
+    "app": {
+        "name": "Simplify QA Agent",
+        "version": "1.0.0-SNAPSHOT"
+    },
+    "git": {
+        "commit": {
+            "id": "05b2e96"
+        }
+    }
+}
+
+
+GET /actuator/metrics — Numbers about your app
+
+management.endpoints.web.exposure.include=*  This property in application.properties will expose all the endpoints
+
+{
+    "names": [
+        "application.ready.time",
+        "application.started.time",
+        "disk.free",
+        "disk.total",
+        "executor.active",
+        "executor.completed",
+        "executor.pool.core",
+        "executor.pool.max",
+        "executor.pool.size",
+        "executor.queue.remaining",
+        "executor.queued",
+        "http.server.requests",
+        "http.server.requests.active",
+        "jvm.buffer.count",
+        "jvm.buffer.memory.used",
+        "jvm.buffer.total.capacity",
+        "jvm.classes.loaded",
+        "jvm.classes.unloaded",
+        "jvm.compilation.time",
+        "jvm.gc.live.data.size",
+        "jvm.gc.max.data.size",
+        "jvm.gc.memory.allocated",
+        "jvm.gc.memory.promoted",
+        "jvm.gc.overhead",
+        "jvm.gc.pause",
+        "jvm.info",
+        "jvm.memory.committed",
+        "jvm.memory.max",
+        "jvm.memory.usage.after.gc",
+        "jvm.memory.used",
+        "jvm.threads.daemon",
+        "jvm.threads.live",
+        "jvm.threads.peak",
+        "jvm.threads.started",
+        "jvm.threads.states",
+        "logback.events",
+        "process.cpu.usage",
+        "process.start.time",
+        "process.uptime",
+        "system.cpu.count",
+        "system.cpu.usage",
+        "tasks.scheduled.execution",
+        "tasks.scheduled.execution.active",
+        "tomcat.sessions.active.current",
+        "tomcat.sessions.active.max",
+        "tomcat.sessions.alive.max",
+        "tomcat.sessions.created",
+        "tomcat.sessions.expired",
+        "tomcat.sessions.rejected"
+    ]
+}
+
+
+these are the metrics that you can track by appending to the current endpoint
+
+
+/actuator/metrics/http.server.requests — the most useful HTTP metric Spring Boot exposes. It tells you how many HTTP requests your app has served, how long they took in total, and what the slowest single request was, with the ability to slice that data by URL, method, status code, and more.
+
+
+/actuator/mappings — Every route in your app
+
+Lists every @RequestMapping, @GetMapping, @PostMapping registered. Super useful to:
+Verify a new endpoint actually registered
+Audit what your API exposes (security review)
+Debug "why is my new controller returning 404?"
+
+
+/actuator/beans — Every Spring bean
+Lists every bean in the application context with its dependencies. Used for debugging dependency injection issues — "why is Spring injecting the wrong implementation?"
+
+/actuator/env — All environment properties
+Shows every config value Spring sees — application.yml, environment variables, command-line args, defaults. Used to debug "why is my app reading the wrong DB URL?"
+
+/actuator/loggers — View AND change log levels at runtime
+
+Actuator exposes 15+ endpoints under /actuator/*. The critical ones are /health for liveness probes, /metrics/http.server.requests for finding slow endpoints, /metrics/hikaricp.connections.active for DB pool monitoring, /loggers for runtime log-level changes, and /mappings to audit registered routes. By default only /health and /info are exposed — others must be explicitly enabled and should be secured to ADMIN role.
+
+TOPIC 3: Securing Actuator Endpoints
+/actuator/env leaks every config value, including DB passwords. /actuator/heapdump lets anyone download your entire JVM memory — including in-memory user data, JWT secrets, everything. Unsecured Actuator is a critical security vulnerability.
+
+Actuator security has two separate concerns:
+
+Which endpoints are exposed over HTTP at all? → controlled in application.yml
+Who can call the exposed endpoints? → controlled in SecurityConfig
+You need both. Exposing an endpoint without securing it = anyone on the internet can hit it.
+
+Layer 1: Exposure (application.yml)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,mappings,loggers,beans
+        # NOT exposed: env, heapdump, threaddump (too sensitive even for ADMIN over HTTP)
+  endpoint:
+    health:
+      show-details: when-authorized
+      # anonymous user sees:  {"status": "UP"}
+      # ADMIN sees full component breakdown with DB details
+
+Layer 2: Authorization (SecurityConfig)
+
+@Bean
+public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    return http
+        .csrf(csrf -> csrf.disable())
+        .sessionManagement(s -> s.sessionCreationPolicy(STATELESS))
+        .authorizeHttpRequests(auth -> auth
+            // existing auth rules
+            .requestMatchers("/api/auth/**").permitAll()
+            .requestMatchers(HttpMethod.GET, "/api/books/**").permitAll()
+
+            // ─── Actuator security ───
+            .requestMatchers("/actuator/health").permitAll()      // load balancer needs this
+            .requestMatchers("/actuator/info").permitAll()        // version check, safe
+            .requestMatchers("/actuator/**").hasRole("ADMIN")     // everything else: ADMIN only
+
+            .anyRequest().authenticated()
+        )
+        .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+        .build();
+}
+
+Order matters here. Spring evaluates requestMatchers top to bottom and stops at the first match. If you put /actuator/** → hasRole(ADMIN) before /actuator/health → permitAll(), the health endpoint becomes ADMIN-only and your load balancer breaks. More specific rules go first.
+
+401 vs 403 — interview favorite:
+
+401 Unauthorized = "I don't know who you are" (no token, or invalid token)
+403 Forbidden = "I know who you are, but you can't access this" (valid USER token hitting ADMIN endpoint)
+
+In real production, companies often run Actuator on a different port that's only accessible inside the private network:
+
+management:
+  server:
+    port: 9090   # Actuator on 9090
+  # main app stays on 8080
+
+Now /actuator/* is physically unreachable from the public internet — only internal monitoring tools (Prometheus, Grafana) inside the VPC can hit it. This is defense in depth: even if you forget a SecurityConfig rule, attackers can't reach the port
+
+Actuator security has two layers. First, application.yml controls which endpoints are exposed over HTTP — I expose health, info, metrics, mappings, loggers, but never env or heapdump in production. Second, SecurityConfig controls access — /health and /info are public for load balancers, everything else is hasRole('ADMIN'). The order of requestMatchers matters: specific rules must come before general ones, otherwise /actuator/** would block /actuator/health. For high-security environments, I run Actuator on a separate management port that's only reachable from inside the private network.
+
+Actuator security has two layers. First, application.yml controls which endpoints are exposed over HTTP — I expose health, info, metrics, mappings, loggers, but never env or heapdump in production. Second, SecurityConfig controls access — /health and /info are public for load balancers, everything else is hasRole('ADMIN'). The order of requestMatchers matters: specific rules must come before general ones, otherwise /actuator/** would block /actuator/health. For high-security environments, I run Actuator on a separate management port that's only reachable from inside the private network
+
+A custom health indicator extends AbstractHealthIndicator and overrides doHealthCheck(Health.Builder). I use it to expose domain-specific health — for the Library API, I report total books, registered users, and active borrows. The class name determines the component key in the JSON response, so LibraryHealthIndicator shows as "library". The key value is that K8s liveness probes hitting /actuator/health will auto-restart pods when my domain logic returns DOWN, not just when infrastructure fails. And because show-details: when-authorized is set, the metric values are only visible to authenticated ADMIN users
+
+TOPIC 5: Correlating Actuator Metrics with Slow Endpoints
+
+User clicks button
+       ↓
+   HTTP request          ← Actuator /metrics/http.server.requests sees this
+       ↓
+  Spring Controller
+       ↓
+   Service layer
+       ↓
+   Repository
+       ↓
+   SQL query             ← pg_stat_statements sees this
+       ↓
+   PostgreSQL plan       ← EXPLAIN ANALYZE shows this
+
+Each layer has a tool. You walk down the chain: start at the HTTP layer (Actuator), find which endpoint is slow, follow it to the SQL layer (pg_stat_statements), find which query is slow, then explain the plan to find why.
+
+Step 1: Find the slow endpoint — http.server.requests
+
+GET /actuator/metrics/http.server.requests
+
+GET /actuator/metrics/http.server.requests?tag=uri:/api/books/search
+
+{
+  "measurements": [
+    { "statistic": "COUNT",      "value": 832    },  // called 832 times
+    { "statistic": "TOTAL_TIME", "value": 687.4  },  // 687 seconds total
+    { "statistic": "MAX",        "value": 4.2    }   // slowest single call: 4.2s
+  ]
+}
+
+avg_time = TOTAL_TIME / COUNT  =  687.4 / 832  =  0.83 seconds per call
+
+0.83 seconds average for a search endpoint is bad. Anything over 200ms on a simple query is suspicious. You've found your culprit — /api/books/search is slow.
+
+Step 2: Find the slow SQL — pg_stat_statements
+
+You know /api/books/search is slow. Now: which SQL query is it running, and is that query slow?
+pg_stat_statements is a PostgreSQL extension that tracks every SQL statement the database has executed, normalizes them (groups WHERE id=1 and WHERE id=2 together), and reports timing.
+
+The production debugging chain is: Actuator's http.server.requests metric finds slow endpoints, filtered by URI tag. Once I have the slow endpoint, pg_stat_statements in PostgreSQL shows me which SQL query that endpoint is running and its average execution time. EXPLAIN ANALYZE on that query shows me the plan — if I see a Seq Scan on a large table, I'm missing an index. I add the index, redeploy, then verify the metric drops in Actuator. The whole loop takes about 15 minutes once you've done it a few times, and it's the difference between guessing and engineering.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

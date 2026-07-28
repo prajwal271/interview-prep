@@ -1,0 +1,335 @@
+DispatcherServlet is Spring MVC's FRONT CONTROLLER
+
+Front Controller = ONE entry point for ALL requests
+Every single HTTP request goes through it first
+Then it decides where to route the request
+
+Without it:
+→ Each URL needs its own servlet
+→ 50 endpoints = 50 servlets
+→ Unmanageable
+
+With DispatcherServlet:
+→ ONE servlet handles everything
+→ Routes to correct controller automatically
+→ You just write @GetMapping("/books") ✅
+
+Browser/Postman sends:
+GET http://localhost:8080/api/books
+           ↓
+┌─────────────────────────────────┐
+│         TOMCAT                  │
+│  (embedded web server in        │
+│   Spring Boot)                  │
+│  Receives raw HTTP request      │
+└────────────┬────────────────────┘
+             ↓
+┌─────────────────────────────────┐
+│      DISPATCHERSERVLET          │
+│  Spring's front controller      │
+│  Receives request from Tomcat   │
+└────────────┬────────────────────┘
+             ↓
+┌─────────────────────────────────┐
+│       HANDLERMAPPING            │
+│  DispatcherServlet asks:        │
+│  "Which method handles          │
+│   GET /api/books?"              │
+│                                 │
+│  Scans all @Controller classes  │
+│  Finds @GetMapping("/api/books")│
+│  Returns: BookController.getAll │
+└────────────┬────────────────────┘
+             ↓
+┌─────────────────────────────────┐
+│       HANDLERADAPTER            │
+│  Invokes the method             │
+│  BookController.getAll()        │
+│  Passes request parameters      │
+│  @PathVariable, @RequestBody    │
+│  extracted here                 │
+└────────────┬────────────────────┘
+             ↓
+┌─────────────────────────────────┐
+│      YOUR CONTROLLER METHOD     │
+│  @GetMapping("/api/books")      │
+│  public ResponseEntity<...>     │
+│       getAll() {                │
+│    return bookService.getAll(); │
+│  }                              │
+└────────────┬────────────────────┘
+             ↓
+┌─────────────────────────────────┐
+│         JACKSON                 │
+│  @RestController has            │
+│  @ResponseBody                  │
+│  Jackson converts your Java     │
+│  object → JSON string           │
+│  List<Book> → [{...},{...}]     │
+└────────────┬────────────────────┘
+             ↓
+┌─────────────────────────────────┐
+│         TOMCAT                  │
+│  Sends HTTP response back       │
+│  Status: 200 OK                 │
+│  Body: JSON string              │
+│  Headers: Content-Type:         │
+│           application/json      │
+└─────────────────────────────────┘
+             ↓
+     Browser/Postman receives
+     the JSON response
+
+
+You add spring-boot-starter-web to pom.xml
+    ↓
+DispatcherServletAutoConfiguration fires
+    ↓
+Spring creates DispatcherServlet bean automatically
+    ↓
+Registers it to handle ALL URLs ("/*")
+    ↓
+Embedded Tomcat starts on port 8080
+    ↓
+DispatcherServlet is ready to receive requests
+
+You write ZERO configuration for this.
+Auto-configuration handles everything. ✅
+
+
+
+WAR stands for Web Application Archive.
+It's a packaged file format (like a ZIP) that bundles everything needed to deploy a Java web application onto a server.
+
+myapp.war
+├── WEB-INF/
+│   ├── web.xml          ← deployment descriptor (config)
+│   ├── classes/         ← compiled .class files
+│   └── lib/             ← dependency JARs
+├── static/
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+└── META-INF/
+    └── MANIFEST.MF
+
+WAR vs JAR:
+            		JAR 				WAR
+Stands for  	 Java Archive			Web Application Archive
+Contains	 Java classes, libraries	Web app (classes + HTML + CSS + JS + libs)
+Runs on		 JVM directly			Web server (Tomcat, JBoss, etc.)
+Used for	 Libraries, standalone apps	Web applications
+
+Spring Boot embeds Tomcat INSIDE your jar
+
+
+Old way (before Spring Boot):
+→ Deploy WAR file to external Tomcat server
+→ Tomcat must be installed separately
+→ Complex deployment process
+
+Spring Boot way:
+→ Tomcat is inside your JAR
+→ java -jar library-app.jar → Tomcat starts
+→ No separate installation
+→ Simple deployment ✅
+
+This is why Spring Boot apps are called
+"standalone" applications
+
+When an HTTP request arrives, Tomcat (embedded in Spring Boot) receives it first and passes it to DispatcherServlet — Spring MVC's front controller. DispatcherServlet asks HandlerMapping which controller method handles this URL. HandlerMapping scans all @Controller classes and returns the matching method. HandlerAdapter invokes that method, extracting @PathVariable, @RequestBody etc. The method runs and returns a value. For @RestController, Jackson automatically converts the return value to JSON. Finally Tomcat sends the HTTP response back to the client.
+
+@Controller     → returns VIEW NAME (HTML page)
+@RestController → returns DATA (JSON/XML)
+
+@Controller  // returns view names
+public class BookPageController {
+
+    private final BookService bookService;
+
+    public BookPageController(BookService bookService) {
+        this.bookService = bookService;
+    }
+
+    @GetMapping("/books")
+    public String getBooksPage(Model model) {
+        // Add data to model
+        model.addAttribute("books", bookService.getAll());
+        // Return VIEW NAME — not data
+        return "books"; // Spring looks for books.html template
+                        // in src/main/resources/templates/
+    }
+}
+
+@RestController  // returns data — Jackson converts to JSON
+public class BookApiController {
+
+    private final BookService bookService;
+
+    public BookApiController(BookService bookService) {
+        this.bookService = bookService;
+    }
+
+    @GetMapping("/api/books")
+    public List<Book> getBooks() {
+        return bookService.getAll();
+        // Jackson converts List<Book> → JSON automatically
+    }
+}
+
+
+
+Jackson — The JSON Converter
+Jackson is auto-configured by Spring Boot. It converts :
+
+
+Java → JSON (serialization):
+Book{id=1, title="Clean Code"} → {"id":1,"title":"Clean Code"}
+List<Book>[...]                → [{...},{...}]
+null field                     → "field":null or omitted
+
+JSON → Java (deserialization):
+{"title":"Clean Code"} → Book object with title set
+[{...},{...}]          → List<Book>
+
+PUT    → Full update. Replace entire resource.
+         PUT /api/books/1 + {body} → replaces book 1
+
+PATCH  → Partial update. Change specific fields.
+         PATCH /api/books/1 + {"available":false}
+
+Idempotent = calling the same request multiple times = same result
+
+@RestController is a combination of @Controller and @ResponseBody. @Controller alone returns view names — Spring looks for an HTML template to render. @RestController treats the return value as data — Jackson automatically converts it to JSON and writes it to the HTTP response body. In modern Spring Boot applications building REST APIs, @RestController is almost always used. @Controller is only needed for server-side rendered apps with template engines like Thymeleaf.
+
+
+bookService.findById(999) → returns null
+Jackson tries to convert null → returns nothing
+HTTP status → always 200 OK
+
+Client gets:
+HTTP 200 OK
+Body: (empty)
+
+Client thinks: "Request succeeded but no data?"
+Confusing. Wrong. ❌
+
+Correct behavior should be:
+HTTP 404 Not Found
+Body: "Book not found"
+
+
+ResponseEntity gives you full control over:
+
+HTTP status code
+Response body
+Response headers
+
+// ResponseEntity = HTTP status + body + headers
+// Think of it as the complete HTTP response package
+
+return ResponseEntity.ok(book);
+// HTTP 200 OK
+return ResponseEntity.status(201).body(savedBook);
+// HTTP 201 Created
+return ResponseEntity.notFound().build();
+// HTTP 404 Not Found
+return ResponseEntity.noContent().build();
+// HTTP 204 No Content
+return ResponseEntity.badRequest().body("Invalid input");
+// HTTP 400 Bad Request
+return new ResponseEntity<>(book, HttpStatus.CREATED);
+// HTTP 201 Created
+
+
+2xx — SUCCESS
+─────────────────────────────────────────────
+200 OK           → request succeeded, body returned
+                   GET, PUT responses
+201 Created      → new resource created
+                   POST responses
+204 No Content   → success but nothing to return
+                   DELETE responses
+
+4xx — CLIENT ERROR (their fault)
+─────────────────────────────────────────────
+400 Bad Request  → invalid data sent by client
+                   missing required field, wrong format
+401 Unauthorized → not authenticated
+                   no token, expired token
+403 Forbidden    → authenticated but no permission
+                   user trying to access admin endpoint
+404 Not Found    → resource doesn't exist
+                   GET /api/books/999 — book 999 not found
+409 Conflict     → resource already exists
+                   POST /api/users with duplicate email
+
+5xx — SERVER ERROR (our fault)
+─────────────────────────────────────────────
+500 Internal Server Error → unhandled exception in your code
+                            NullPointerException, etc.
+503 Service Unavailable   → server overloaded or down
+
+
+
+ResponseEntity vs JustReturningObject
+
+→ Always 200 even if null
+→ No control over status
+→ Simple but inflexible
+
+→ 200 when found
+→ 404 when not found
+→ Full control ✅
+→ Proper REST behavior
+
+ResponseEntity gives full control over the HTTP response — status code, body, and headers. Without it, Spring always returns 200 OK regardless of outcome. With ResponseEntity, you return 201 for creation, 204 for deletion, 404 when resource not found, 400 for bad input. This is critical for REST API design — clients rely on status codes to understand what happened. ResponseEntity.ok() for 200, .status(201).body() for creation, .notFound().build() for 404, .noContent().build() for 204. The key status codes are 200 success, 201 created, 204 no content, 400 bad request, 401 unauthenticated, 403 unauthorized, 404 not found, 500 server error.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

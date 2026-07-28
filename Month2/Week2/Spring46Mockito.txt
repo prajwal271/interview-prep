@@ -1,0 +1,376 @@
+PART 6 — Mockito: the problem it solves + test doubles
+6.1 The problem: real classes have dependencies
+
+Everything we tested so far (Calculator, BankAccount, DiscountCalculator) was self-contained — it didn't need anything external. Real business code isn't like that. Look at a service:
+
+public class OrderService {
+
+    private final PaymentGateway paymentGateway;     
+    private final InventoryRepository inventory;     
+
+    public OrderService(PaymentGateway paymentGateway, InventoryRepository inventory) {
+        this.paymentGateway = paymentGateway;
+        this.inventory = inventory;
+    }
+
+    public String placeOrder(String item, int qty) {
+        if (!inventory.isAvailable(item, qty)) {      
+            return "OUT_OF_STOCK";
+        }
+        boolean paid = paymentGateway.charge(item, qty);  
+        if (!paid) {
+            return "PAYMENT_FAILED";
+        }
+        inventory.reduce(item, qty);                 
+        return "CONFIRMED";
+    }
+}
+
+
+The dependencies are just interfaces describing what they do:
+
+public interface PaymentGateway {
+    boolean charge(String item, int qty);   // returns true if payment succeeded
+}
+
+public interface InventoryRepository {
+    boolean isAvailable(String item, int qty);
+    void reduce(String item, int qty);
+}
+
+Now I want to unit test placeOrder. But placeOrder uses a payment gateway and a database. If my test creates the real ones, I have a problem
+
+Why you can't just use the real dependencies
+A real DB/network call is milliseconds-to-seconds. Multiply by thousands of tests → minutes. Breaks "F" (Fast) in FIRST.
+The payment provider could be down, or rate-limit you. Your test fails for reasons unrelated to your code. Breaks "R" (Repeatable).
+A real charge() moves real money. A real reduce() mutates real data. You can't run tests that charge cards.
+How do you test the "payment failed" branch? You can't make a real gateway fail on command. You'd have no way to test error paths.
+If the test fails, was it your code or the DB? You can't tell. Breaks "I" (Isolated).
+
+So you need stand-in objects that look like a PaymentGateway and an InventoryRepository to OrderService, but that you control completely — they're fast, predictable, have no side effects, and can be told to "fail" or "succeed" on demand.
+
+That stand-in is a test double, and Mockito is the library that creates them.
+
+Why do we need mocking in unit tests?
+To isolate the unit under test from its dependencies. Real dependencies like databases and external APIs are slow, unreliable, have side effects, and make it impossible to force specific scenarios like failures. Mocks are fast, deterministic stand-ins I fully control, so the test exercises only my code's logic and the failure of a test points squarely at that code
+
+Test doubles taxonomy — the 5 types (classic interview question)
+"Test double" is the umbrella term (coined by Gerard Meszaros) for any fake object that replaces a real one. There are five flavours, and interviewers love asking you to distinguish them
+
+1) Dummy --> An object passed just to fill a parameter, never actually used. --> Passing null or an empty object to satisfy a constructor you don't care about in this test.
+2) Stub --> Returns hard-coded answers to calls. --> A fake InventoryRepository whose isAvailable() always returns true
+3) Mock --> A stub that also remembers how it was called --> A mock does everything a stub does plus one extra power: it records every interaction, so afterward you can verify it was called correctly — right method, right arguments, right number of times.
+That extra ability — checking the interaction itself — is the entire difference between a stub and a mock.
+
+PaymentGateway payment = mock(PaymentGateway.class);
+// --- using it as a STUB (canned answer) ---
+when(payment.charge("book", 1)).thenReturn(true);   // "if asked, say payment succeeded"
+// ... run the code under test ...
+
+// --- using it as a MOCK (verify the interaction) ---
+verify(payment).charge("book", 1);   // ASSERT: charge WAS called, once, with exactly these args
+
+That verify(...) line is the mock part. With a pure stub you only ask "did the method produce the right result?" With a mock you can also ask "did my code actually call the payment gateway the right way?"
+
+Stub answers a question → you check the result (state verification).
+Mock records the call → you check the interaction (behaviour verification).
+
+One-liner: a mock is a stub with a memory — it remembers how it was used so you can verify the conversation, not just the answer
+
+4) Spy --> A real object that you've put a tap on
+A mock is 100% fake — every method is hollow and returns a default until you stub it.
+A spy is the opposite starting point: it wraps a REAL object, so the real methods actually run — unless you specifically override (stub) one. That's why it's called a partial mock.
+
+List<String> realList = new ArrayList<>();   // a genuine, working ArrayList
+List<String> spyList = spy(realList);        // wrap it in a spy
+
+spyList.add("apple");                 // REAL add() runs — "apple" is genuinely added
+spyList.add("banana");
+System.out.println(spyList.size());   // REAL size() runs → prints 2
+
+// now override just ONE method:
+doReturn(100).when(spyList).size();   // fake only size()
+System.out.println(spyList.size());   // → prints 100 (faked)
+System.out.println(spyList.get(0));   // still REAL → "apple"
+
+a mock is a hollow shell you fill in; a spy is a real object with a few methods swapped out.
+
+5) Fake --> A real working mini implementation that you write by yourself
+A fake is an actual working implementation of the dependency — it has real logic — it's just simplified and not production-grade. 
+It is not a stub .
+The classic example: instead of a real database-backed repository, you write an in-memory one backed by a HashMap:
+
+// The real one talks to PostgreSQL. The fake just uses a Map in memory.
+public class FakeInventoryRepository implements InventoryRepository {
+
+    private final Map<String, Integer> stock = new HashMap<>();
+
+    public void setStock(String item, int qty) {   // helper for the test to load data
+        stock.put(item, qty);
+    }
+
+    @Override
+    public boolean isAvailable(String item, int qty) {
+        return stock.getOrDefault(item, 0) >= qty;   // REAL logic, just against a Map
+    }
+
+    @Override
+    public void reduce(String item, int qty) {
+        stock.put(item, stock.get(item) - qty);      // actually mutates the in-memory store
+    }
+}
+
+Use it in a test like a real object:
+
+FakeInventoryRepository inventory = new FakeInventoryRepository();
+inventory.setStock("book", 5);
+
+OrderService service = new OrderService(payment, inventory);
+service.placeOrder("book", 2);
+
+// the fake actually did the math:
+assertTrue(inventory.isAvailable("book", 3));   // 5 - 2 = 3 left, so 3 available → true
+
+See the difference from a stub? A stub would just say when(inventory.isAvailable("book", 3)).thenReturn(true) — a hard-coded answer with no thinking behind it. The fake genuinely computes 5 - 2 = 3 and decides for itself. It behaves like the real thing, just lighter.
+Stub: "When asked X, blindly return Y." No logic. You hard-code each answer.
+Fake: A real implementation with working logic, just using a shortcut (memory instead of a DB). It responds correctly to any input on its own.
+
+A dummy fills a parameter slot but is never used. A stub returns canned values so I can verify the result. A mock is a stub that also records interactions so I can verify behaviour — which method was called, with what args, how many times. A spy wraps a real object so real methods run unless I stub them — a partial mock. A fake is a real but simplified working implementation, like an in-memory repository instead of a database. Mockito provides mocks and spies; fakes I write by hand
+
+A stub answers questions — it provides state/data ("return true"). You assert on the output of the method under test.
+A mock records behaviour — it lets you assert on the interaction itself ("was charge called once with these args?"). This is called behaviour verification.
+
+A stub provides canned return values so the code under test can run — I verify the final result. A mock additionally records how it was called, so I can verify the interaction itself — which method, with what arguments, how many times. Stubbing is state verification; mocking is behaviour verification.
+
+A mock is a complete fake — every method returns a default unless stubbed. A spy wraps a real object, so real methods actually execute unless I explicitly stub them — it's a partial mock. I use a spy when I want most of an object's real behaviour but need to override one or two methods.
+
+A real, working implementation that's too simplified for production — like an in-memory HashMap standing in for a database. It actually behaves, unlike a stub that just returns fixed values.
+
+
+class OrderServiceTest {
+
+    @Test
+    void placeOrder_whenInStockAndPaid_returnsConfirmed() {
+        // Arrange — create FAKE dependencies
+        PaymentGateway payment = mock(PaymentGateway.class);          // a fake PaymentGateway
+        InventoryRepository inventory = mock(InventoryRepository.class); // a fake InventoryRepository
+
+        // STUBBING — program the fakes: "when called like this, return this"
+        when(inventory.isAvailable("book", 1)).thenReturn(true);     // pretend it's in stock
+        when(payment.charge("book", 1)).thenReturn(true);           // pretend payment succeeds
+
+        // Inject the fakes into the real object under test
+        OrderService service = new OrderService(payment, inventory);
+
+        // Act — call the real method; internally it calls our fakes
+        String result = service.placeOrder("book", 1);
+
+        // Assert
+        assertEquals("CONFIRMED", result);
+    }
+}
+
+
+mock(PaymentGateway.class) — "make me a fake object that implements PaymentGateway."
+when(inventory.isAvailable("book", 1)).thenReturn(true) — "fake, when someone asks you isAvailable("book", 1), answer true." (This is stubbing.)
+new OrderService(payment, inventory) — the real service, but with fakes wired in.
+The real placeOrder runs its real logic, but each time it reaches out to a dependency, it hits our controlled fake instead of a real DB/gateway.
+
+
+What does a mock return before you stub it? 
+When you write mock(PaymentGateway.class), Mockito doesn't have your real implementation. Internally, it generates a brand-new class at runtime (via bytecode generation, using a library called ByteBuddy) that implements the interface — and every method returns a harmless default:
+
+So an un-stubbed mock never crashes — it just returns "nothing-ish." That's why you can create a mock and only stub the one or two methods your test cares about; the rest quietly return defaults
+
+PaymentGateway payment = mock(PaymentGateway.class);
+boolean result = payment.charge("x", 1);   // not stubbed → returns false (default for boolean)
+
+What does a mocked method return if you don't stub it?
+A type-appropriate default — null for objects, 0 for numerics, false for booleans, and an empty collection for List/Set/Map. So un-stubbed methods are safe no-ops, which is why I only stub the calls relevant to the test.
+
+How does Mockito create a mock under the hood?
+"It dynamically generates a subclass/proxy of the target type at runtime using bytecode generation (ByteBuddy in modern Mockito), overriding methods to return defaults and to record invocations. That's also why, with the older mock maker, it couldn't mock final classes — you can't subclass final; the inline mock maker, default in Mockito 5, works around that.
+
+Can you mock a concrete class, or only interfaces?
+Both — Mockito can mock interfaces and concrete classes. Mocking against interfaces is cleaner and preferred, but mocking a concrete class works too. With the inline mock maker it can even mock final classes and static methods.
+
+PART 7 — @Mock, @InjectMocks + stubbing in depth
+Mockito gives you annotations to declare mocks once as fields and wire them automatically.
+
+@ExtendWith(MockitoExtension.class) — the switch that turns annotations on
+
+By themselves, @Mock and @InjectMocks do nothing — they're just markers. Something has to read them and actually create the mocks before each test runs. That something is MockitoExtension, and you plug it in with JUnit 5's @ExtendWith:
+
+@ExtendWith(MockitoExtension.class)   // hands control to Mockito before each test
+class OrderServiceTest { ... }
+
+MockitoExtension is a JUnit 5 extension — a class that hooks into the test lifecycle. Before each test, it scans your class for @Mock/@Spy/@InjectMocks fields and initialises them. Forget this annotation and your @Mock fields stay null → instant NullPointerException
+
+What does @ExtendWith(MockitoExtension.class) do?
+It registers Mockito's JUnit 5 extension, which processes the Mockito annotations — creating the @Mocks and injecting them into @InjectMocks before each test. Without it, the annotations are inert and the mock fields are null.
+
+How was this done in JUnit 4?
+JUnit 4 used @RunWith(MockitoJUnitRunner.class). JUnit 5 replaced the single 'runner' model with composable extensions, so it's @ExtendWith(MockitoExtension.class) now — and you can stack multiple extensions, which JUnit 4 runners couldn't.
+
+Alternative without the extension (good to know): you can initialise the annotations manually in @BeforeEach:
+
+@BeforeEach
+void setUp() {
+    MockitoAnnotations.openMocks(this);   // initialises @Mock/@InjectMocks fields on 'this'
+}
+
+openMocks returns a closeable you can close in @AfterEach to release mocks. Most teams prefer the cleaner @ExtendWith approach; you'd mention openMocks if asked "how else?" or when you can't use the extension. (openMocks replaced the older, now-deprecated initMocks.)
+
+@Mock — "create a mock here"
+
+@Mock
+PaymentGateway payment;     // exactly equivalent to: payment = mock(PaymentGateway.class);
+
+@Mock on a field tells MockitoExtension: "make a mock of this type and assign it to this field before each test." It's pure shorthand for mock(...).
+
+@InjectMocks — "build the real object and inject the mocks into it"
+@InjectMocks goes on the class under test (the real object, not a mock):
+
+@InjectMocks
+OrderService service;   // creates a REAL OrderService and pushes the @Mock fields into it whatever that are created if not created injects null
+
+Mockito creates a genuine OrderService and injects the @Mock fields (payment, inventory) into it — so you don't manually call new OrderService(payment, inventory). It matches mocks to constructor parameters/fields by type.
+
+How @InjectMocks decides HOW to inject 
+Mockito tries three injection strategies, in this priority order:
+1) Constructor injection — if the class has a constructor, Mockito picks the biggest one it can satisfy and passes the mocks as arguments. This is preferred.
+2) Setter injection — if no usable constructor, it looks for setter methods matching the mock types.
+3) Field injection — as a last resort, it sets the fields directly (even private ones, via reflection).
+
+Our OrderService has a constructor taking both dependencies, so Mockito uses constructor injection — the cleanest path.
+
+Explain @InjectMocks and its injection order.
+@InjectMocks creates a real instance of the class under test and injects the declared mocks into it, matching by type. It tries constructor injection first, then setter injection, then field injection. Constructor injection is preferred because it makes dependencies explicit and the object can be final and immutable.
+
+What if two @Mock fields are the same type?
+
+@ExtendWith(MockitoExtension.class)
+class OrderServiceTest {
+
+    @Mock
+    PaymentGateway primaryPayment;    // Same type
+
+    @Mock
+    PaymentGateway backupPayment;     // Same type ← PROBLEM!
+
+    @InjectMocks
+    OrderService orderService;
+}
+
+It will check for the OrderService class
+
+public class OrderService {
+    private PaymentGateway primaryPayment;   // field name matters!
+    private PaymentGateway backupPayment;    // field name matters!
+
+    public OrderService(PaymentGateway primaryPayment, 
+                        PaymentGateway backupPayment) {
+        this.primaryPayment = primaryPayment;
+        this.backupPayment = backupPayment;
+    }
+}
+
+this field name and the field names in The OrderServiceTest matches
+
+If the field names do not match silent null will be injected at runtime so whenever that method is called null pointer exception is thrown 
+
+if different field names are there then instead of letting the Mockito to initialize the Class with constructor you only initialise the variable
+
+  @BeforeEach
+    void setUp() {
+        // Manual wiring — crystal clear, no guessing
+        orderService = new OrderService(primaryPayment, backupPayment);
+        //                               ↑ you control exactly what goes where
+    }
+
+
+Is @InjectMocks itself a mock?
+No — that's the common confusion. @InjectMocks is the real object under test; only its dependencies are mocks. You never mock the class you're testing, or you'd be testing the mock
+
+Stubbing in depth — controlling what mocks return
+"Stubbing" = telling a mock how to respond. The grammar is when(call).then...(...).
+
+thenReturn — return a value
+
+when(inventory.isAvailable("book", 1)).thenReturn(true);
+when(payment.charge("book", 1)).thenReturn(true);
+
+You can return different values for different arguments:
+
+when(inventory.isAvailable("book", 1)).thenReturn(true);
+when(inventory.isAvailable("pen", 100)).thenReturn(false);   // different args → different answer
+
+How do you make a mock return different values on successive calls?
+Pass multiple values to thenReturn(v1, v2, v3) or chain .thenReturn(...). Each call consumes the next value; once exhausted, the last value repeats. Useful for retries, counters, or polling logic
+
+thenThrow --> It is used to simulate a failure , this is how you test error paths
+
+when(payment.charge("book", 1)).thenThrow(new RuntimeException("gateway down"));
+
+thenAnswer --> thenReturn always return the hardcoded output if you want to return what that you want while returning the answer or if you want to process the input and based upon the input if you want to return the output we need to use thenAnswer
+
+when(payment.charge(anyString(), anyInt()))
+        .thenAnswer(invocation -> {
+            String item = invocation.getArgument(0);   // the actual 1st arg at call time
+            int qty     = invocation.getArgument(1);   // the actual 2nd arg
+            return qty < 100;                           // "succeeds" only for small quantities
+        });
+
+service.placeOrder("book", 1);
+
+
+anyString() and anyInt() are argument matchers — they are not about what gets returned. They are about what arguments to listen for.
+
+when(inventory.isAvailable(anyString(), anyInt()))
+//                          ↑             ↑
+//                   "match ANY string   "match ANY int
+//                    passed here"        passed here"
+
+anyString() = "I don't care what string comes in — match ALL strings"
+anyInt()    = "I don't care what int comes in   — match ALL ints"
+
+they are argument matched they take values from the calling method , instead of hardcoding the values in when method of the Mockito we will use anyString() , "pen" is passed in the place order method it will take pen as input , if dog it will take dog as input and produce the test result
+
+Difference between thenReturn and thenAnswer?
+thenReturn supplies a precomputed fixed value. 
+thenAnswer takes a callback that receives the actual invocation, so the return can depend on the real arguments passed at call time — useful when the response must vary with input, but I keep it rare to avoid logic-heavy tests
+
+
+for Example
+
+when(payment.charge(anyString(), anyInt()))
+        .thenAnswer(invocation -> {
+            String item = invocation.getArgument(0);   // the actual 1st arg at call time
+            int qty     = invocation.getArgument(1);   // the actual 2nd arg
+            if(qty<1) return true; else if(qty==0)return false; else throw new RuntimeException();
+        });
+
+service.placeOrder("book", 1);
+
+How do you stub a method to throw an exception, and why would you?
+
+when(mock.method()).thenThrow(new SomeException()). I use it to exercise error-handling paths — retries, fallbacks, error responses — which I otherwise couldn't trigger reliably with a real dependency
+
+You cannot write when(mock.voidMethod()) — a void call returns nothing, so there's nothing to hand to when(...). Stubbing void methods uses a different do* syntax (doNothing, doThrow) 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

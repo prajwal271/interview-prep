@@ -1,0 +1,314 @@
+SecurityContextHolder.getContext().setAuthentication(authToken);
+
+In the filter we will save the token 
+@GetMapping("/api/profile")
+public User getMyProfile() {
+    Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+    String email = auth.getName();
+    return userService.findByEmail(email);
+}
+
+The filter ran first. The controller runs later. They're different methods, different classes, different stack frames. How can they share the same SecurityContextHolder?
+The answer is ThreadLocal. Let's break this down. 
+
+When a request hits your Spring Boot app, here's what happens:
+Request 1: GET /api/books     ──────►  Thread #1 handles it
+Request 2: POST /api/borrow   ──────►  Thread #2 handles it
+Request 3: GET /api/profile   ──────►  Thread #3 handles it
+
+Each incoming request gets its own thread from Spring's thread pool. That thread runs all the code for that request:
+The filter chain
+The controller method
+The service method
+The DB query
+
+…then the thread is released back to the pool for the next request.
+Within a single request, one thread does everything. The filter and the controller share the same thread.
+
+Java has a class called ThreadLocal. It's a special kind of variable where:
+Each thread has its own copy
+Threads can't see each other's copies
+Each thread can read/write its own copy from anywhere in the code
+
+Thread #1's whiteboard:  "Current user: john@lib.com"
+Thread #2's whiteboard:  "Current user: mary@lib.com"
+Thread #3's whiteboard:  "Current user: (anonymous)"
+
+Each thread can write and read it's own data but it cannot peek into other threads data
+
+How SecurityContextHolder Uses ThreadLocal
+
+public class SecurityContextHolder {
+    private static final ThreadLocal<SecurityContext> contextHolder = new ThreadLocal<>();
+
+    public static SecurityContext getContext() {
+        SecurityContext ctx = contextHolder.get();
+        if (ctx == null) {
+            ctx = new SecurityContextImpl();  // empty context
+            contextHolder.set(ctx);
+        }
+        return ctx;
+    }
+
+    public static void setContext(SecurityContext context) {
+        contextHolder.set(context);
+    }
+
+    public static void clearContext() {
+        contextHolder.remove();
+    }
+}
+
+A static ThreadLocal<SecurityContext> field
+getContext() returns the current thread's context
+setContext() updates the current thread's context
+
+Let me trace a real request through the system:
+
+[Thread #5 is assigned to the request]
+
+▼ Step 1: JwtAuthenticationFilter runs
+   SecurityContextHolder.getContext().setAuthentication(authToken);
+   
+   ↓ Thread #5's ThreadLocal now stores: { user: "john@lib.com", role: USER }
+
+▼ Step 2: Other filters run
+   They can read Thread #5's context if needed.
+
+▼ Step 3: DispatcherServlet routes to BookController.getBooks()
+   Still Thread #5.
+
+▼ Step 4: Controller code runs
+   Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+   
+   ↓ Reads Thread #5's ThreadLocal → returns the auth we set in Step 1!
+
+▼ Step 5: Service code runs (still Thread #5)
+   Can also call SecurityContextHolder.getContext() and get the same auth.
+
+▼ Step 6: Response sent back to client
+
+▼ Step 7: Spring Security cleans up
+   SecurityContextHolder.clearContext();
+   
+   ↓ Thread #5's ThreadLocal is wiped clean
+   ↓ Thread #5 goes back to the pool, ready for next request
+
+
+The SecurityContextHolder static methods always operate on the current thread's data — and since one thread handles the entire request, the data is consistent across the filter, controller, and service layers.
+
+Spring Security's filter chain automatically calls SecurityContextHolder.clearContext() at the end of every request. You don't have to do anything — but knowing this exists is critical for understanding the system.
+
+The Authentication interface looks like:
+public interface Authentication extends Principal {
+    Object getPrincipal();          // The user (UserDetails object)
+    Object getCredentials();         // Password (null for JWT)
+    Collection<GrantedAuthority> getAuthorities();  // Roles
+    boolean isAuthenticated();       // true if logged in
+    String getName();                // username (email)
+    Object getDetails();             // Request metadata (IP, session)
+}
+
+Here are the 3 common ways to access the current user in a controller:
+
+@GetMapping("/api/profile")
+public User getMyProfile() {
+    Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+    String email = auth.getName();  // returns "john@lib.com"
+    return userRepository.findByEmail(email).orElseThrow();
+}
+
+@GetMapping("/api/profile")
+public User getMyProfile(@AuthenticationPrincipal UserDetails userDetails) {
+    return userRepository.findByEmail(userDetails.getUsername()).orElseThrow();
+}
+
+@GetMapping("/api/profile")
+public User getMyProfile(Authentication authentication) {
+    return userRepository.findByEmail(authentication.getName()).orElseThrow();
+}
+
+With Sessions (Old Way):
+
+Server creates session → stores in memory/DB
+Session ID in cookie
+On every request, server looks up the session
+SecurityContext persists across requests (via the session)
+
+With JWT (Our Way):
+
+No session storage on server
+SecurityContext is rebuilt from scratch every request (by our filter)
+After response → context is cleared
+Next request → starts with empty context, filter rebuilds it from the JWT
+
+💎 This is why JWT is "stateless." The server doesn't remember you between requests — every request re-proves identity via the JWT, and the SecurityContext is just a temporary, per-request convenience for the duration of that one request.
+
+SecurityContextHolder uses Java's ThreadLocal to store the authentication context per thread. Since Spring assigns one thread per HTTP request, the context set by my JWT filter at the beginning of the request is accessible to all subsequent code in that request — controllers, services, repositories. After the response is sent, Spring Security automatically clears the context to prevent leakage to other requests reusing the same thread from the pool. This is what makes JWT 'stateless' on the server side — the SecurityContext is rebuilt from the JWT on every request, used during that request, and discarded immediately after. In code, I prefer using @AuthenticationPrincipal to inject the current user into controllers, rather than calling SecurityContextHolder.getContext() directly — it's cleaner and easier to test.
+
+
+🔹 TOPIC 6 — Failure Handling: Invalid Tokens & 401 Responses
+
+SignatureException ---> Signature doesn't match
+ExpiredJwtException ---> Token has expired
+MalformedJwtException ---> Token isn't valid JWT format
+UnsupportedJwtException ---> Algorithm not supported
+IllegalArgumentException ---> Missing token
+
+All of these extend JwtException, so we can catch them as a group if needed.
+
+We don't return immediately on failure
+Just don't set the SecurityContext
+Let the request continue without auth
+Spring's authorization layer will return 401 if the endpoint requires auth
+
+"Why not return 401 immediately in the filter?"
+✅ Public endpoints (/api/auth/register) should still work even if a stale token is sent
+✅ The endpoint decides whether auth is required, not the filter
+✅ Separates concerns: the filter identifies, the authorization layer decides
+
+The filter's job: "Try to figure out who you are."
+The authorization layer's job: "Decide if you're allowed."
+
+Right now, if a user tries to access a protected endpoint without a valid token, Spring returns a default error page or 403. We want a clean 401 JSON response.
+For this, Spring gives us an interface: AuthenticationEntryPoint.
+
+It's Spring's hook for "What do I do when an unauthenticated user tries to access a protected resource?"
+
+public interface AuthenticationEntryPoint {
+    void commence(
+        HttpServletRequest request,
+        HttpServletResponse response,
+        AuthenticationException authException
+    ) throws IOException, ServletException;
+}
+
+The commence() method
+
+Called by Spring automatically when an unauthenticated user hits a protected endpoint
+3 parameters: request, response, the exception that caused this
+
+
+✅ Sample Response the Client Will See
+
+
+{
+  "timestamp": "2026-05-12T14:32:18.234",
+  "status": 401,
+  "error": "Unauthorized",
+  "message": "Authentication required to access this resource",
+  "path": "/api/books"
+}
+
+Let me trace what happens now with an invalid token:
+
+1. Client sends: GET /api/books
+   Authorization: Bearer eyJhbGc.TAMPERED.signature
+
+2. JwtAuthenticationFilter runs:
+   - Extracts JWT
+   - Tries to extract username
+   - SignatureException thrown! (signature doesn't match)
+   - CAUGHT in catch block
+   - Logged: "Invalid JWT signature for request /api/books"
+   - SecurityContext NOT set
+   - filterChain.doFilter() called (continue)
+
+3. Request reaches authorization layer:
+   - /api/books requires auth (per our config)
+   - No authenticated user in SecurityContext
+   - AuthenticationException thrown internally
+
+4. Spring's exception handler:
+   - Catches AuthenticationException
+   - Calls JwtAuthenticationEntryPoint.commence()
+
+5. Our EntryPoint:
+   - Sets status 401
+   - Writes clean JSON error response
+
+6. Client receives:
+   {
+     "timestamp": "...",
+     "status": 401,
+     "error": "Unauthorized",
+     "message": "Authentication required...",
+     "path": "/api/books"
+   }
+
+
+Authentication : 401 error ,Login, JWT validation
+Authorization : 403 Forbidden , Role-based access
+
+
+For production-ready JWT auth, I wrap the JWT processing logic in a try-catch inside my filter to handle the various JJWT exceptions — SignatureException for tampering, ExpiredJwtException for expiry, MalformedJwtException for garbage tokens. Instead of crashing the request with a 500, I log the failure for ops monitoring and simply don't set the SecurityContext. Then Spring's authorization layer detects the unauthenticated state and triggers my custom AuthenticationEntryPoint, which returns a clean 401 JSON response without leaking internal details. I also configure SessionCreationPolicy.STATELESS because JWT doesn't need server-side sessions, and I disable CSRF since stateless APIs aren't vulnerable to it. The result is professional, debuggable, secure error handling.
+
+
+Complete Architecture
+
+┌─────────────────────────────────────────────────────────┐
+│              YOUR LIBRARY API (Spring Boot)             │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  SecurityConfig.java                            │   │
+│  │  - Defines public/protected endpoints           │   │
+│  │  - Plugs in filter + entry point                │   │
+│  │  - Stateless session policy                     │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  JwtAuthenticationFilter.java                   │   │
+│  │  - Runs on every request                        │   │
+│  │  - Extracts & validates JWT                     │   │
+│  │  - Sets SecurityContext                         │   │
+│  │  - Catches JWT exceptions gracefully            │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  JwtAuthenticationEntryPoint.java               │   │
+│  │  - Returns clean JSON 401 on unauthorized       │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  LibraryUserDetailsService.java                 │   │
+│  │  - Loads user from DB by email                  │   │
+│  │  - Converts to Spring UserDetails               │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  JwtUtil.java (from Day 23)                     │   │
+│  │  - Generates tokens                             │   │
+│  │  - Validates tokens                             │   │
+│  └─────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,566 @@
+JSON Web Tokens 
+
+TOPIC 1 — What is JWT and Why Does it Exist?
+Imagine a website without JWT. How does it remember who you are after login?
+User logs in with email + password
+Server creates a session (a record in server memory or database)
+Server sends back a session ID (like abc123) in a cookie
+On every request, browser sends the cookie back
+Server looks up abc123 in its session storage → finds user → processes request
+
+Browser  →  [login: email, password]  →  Server
+Server   →  saves session in DB        
+Server   →  [Set-Cookie: SESSIONID=abc123]  →  Browser
+Browser  →  [GET /profile + Cookie: abc123] →  Server
+Server   →  looks up abc123 in DB → user = John → returns profile
+
+❌ Problems with Session-Based Auth
+Server has to store sessions → Eats memory/DB space
+Doesn't scale horizontally → If you have 5 servers, the session created on Server 1 won't exist on Server 2 (unless you share storage — extra complexity)
+Bad for mobile apps & microservices → Cookies don't fit modern architecture
+CSRF attacks → Cookies are auto-sent, opening attack vectors
+
+With JWT, the server doesn't store anything. The token itself contains all the info needed.
+
+Step-by-step:
+User logs in with email + password
+Server creates a JWT token containing user info (email, role, expiry)
+Server signs the token with a secret key and sends it to the client
+Client stores the token (in localStorage or memory)
+On every request, client sends the token in the Authorization header
+Server verifies the signature → if valid, trusts the info inside
+
+Client   →  [login: email, password]  →  Server
+Server   →  generates JWT token (NOT stored anywhere)
+Server   →  [returns JWT in response body]  →  Client
+Client   →  stores token locally
+Client   →  [GET /profile, Authorization: Bearer <token>]  →  Server
+Server   →  verifies signature → extracts user info → returns profile
+
+
+🎯 Why JWT is Powerful
+Feature						Benefit
+Stateless			Server stores nothing → easy to scale across many servers
+Self-contained			Token has user info, role, expiry — no DB lookup needed
+Mobile-friendly			Works easily with iOS/Android apps (just send a header)
+Microservice-ready		Any service with the secret key can verify the token
+Standardized			RFC 7519 — used by AWS, Google, Auth0, every modern API
+
+
+Session-based auth = "Server remembers you" (stateful)
+JWT auth = "You bring proof of who you are on every request" (stateless)
+
+"JWT is a stateless authentication mechanism. Unlike session-based auth, where the server stores user sessions in memory or database, JWT puts user information inside the token itself, signed with a secret key. This means the server doesn't need to remember anything — it just verifies the signature on every request. This makes JWT perfect for scalable, microservice-based, and mobile-first applications."
+
+"If JWT doesn't store anything on the server, how does the server know the token is real and not forged by a hacker?"
+ the answer is the signature, which we'll cover in Topic 1 part 2. The secret key is the magic. Only the server knows it, so only the server can produce a valid signature.
+
+TOPIC 2 — JWT Structure: Header.Payload.Signature
+
+Now let's open up a JWT and see what's inside. This is where most people get confused — let's make it crystal clear.
+A JWT looks like : eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGxpYi5jb20iLCJyb2xlIjoiVVNFUiIsImV4cCI6MTcwMDAwMDAwMH0.dGhpc0lzVGhlU2lnbmF0dXJlSGFzaA
+3 parts, separated by 2 dots. Always. That's the JWT format.
+
+🧩 PART 1 — The HEADER
+The header describes how the token is signed.
+What it looks like before encoding (just plain JSON):
+{
+  "alg": "HS256",
+  "typ": "JWT"
+}
+
+Field			Meaning
+alg		The signing algorithm (e.g., HS256 = HMAC-SHA256)
+typ		The type of token — always "JWT"
+
+This JSON gets Base64 encoded (NOT encrypted — just encoded for safe transport in URLs/headers).
+Base64 is NOT encryption. Anyone can decode it. It's just a way to safely transport binary/special characters in text form (like in HTTP headers).
+
+🧩 PART 2 — The PAYLOAD (The Important One!)
+This is where the actual user info goes. Also called "claims" in JWT terminology.
+What it looks like before encoding:
+
+{
+  "sub": "user@lib.com",
+  "role": "USER",
+  "iat": 1699900000,
+  "exp": 1700000000
+}
+
+📖 Standard Claims (Reserved Fields)
+The JWT spec (RFC 7519) defines some standard fields. You should know these:
+
+Claim		Full Name		Meaning
+sub	Subject			Who the token is about (usually email or user ID)
+iat	Issued At		When the token was created (UNIX timestamp)
+exp	Expiration		When the token expires (UNIX timestamp)
+iss	Issuer			Who created the token (e.g., "library-api")
+aud	Audience		Who the token is intended for
+jti	JWT ID			Unique ID for the token (for blacklisting)
+
+🎨 Custom Claims (Your Own Fields)
+You can add anything else you want — these are called custom claims:
+
+{
+  "sub": "user@lib.com",
+  "role": "USER",
+  "userId": 42,
+  "department": "Engineering",
+  "exp": 1700000000
+}
+
+This JSON also gets Base64 encoded to form the second part of the JWT.
+The payload is just Base64 encoded — NOT encrypted.
+Anyone who intercepts the token can decode it and read everything inside.
+
+❌ NEVER put these in JWT:
+Passwords (even hashed)
+Credit card numbers
+Aadhaar / SSN / PAN numbers
+Bank account numbers
+Any sensitive personal data
+
+✅ SAFE to put in JWT:
+
+User ID
+Email
+Role (USER, ADMIN)
+Username
+Expiry timestamp
+
+
+🧩 PART 3 — The SIGNATURE (The Security Magic!)
+This is what makes JWT trustworthy. Without it, JWT would be useless.
+
+How it's created:
+signature = HMAC-SHA256(
+    base64(header) + "." + base64(payload),
+    SECRET_KEY
+)
+
+In plain English:
+Take the encoded header and payload, joined by a dot
+Hash them using HMAC-SHA256 with a secret key
+The result is the signature
+
+
+Header              Payload          Secret Key
+         ↓                    ↓                  ↓
+"eyJhbGc..."  +  "."  +  "eyJzdWIi..."  →  [HMAC-SHA256]  →  "dGhpc0lzVGhl..."
+                                                                    ↑
+                                                              The Signature
+
+🔐 How the Signature Protects the Token
+
+The signature is like a wax seal on a royal letter. Here's the magic:
+Scenario: A hacker intercepts your JWT and tries to tamper with it.
+
+Hacker decodes the payload, sees: {"role": "USER"}
+Hacker changes it to: {"role": "ADMIN"} 😈
+Hacker re-encodes it and reassembles the JWT
+Hacker sends this forged token to your server
+
+What happens on the server?
+
+Server receives the token
+Server takes the (tampered) header + payload
+Server recomputes the signature using its SECRET_KEY
+Server compares: does the new signature match the one in the token?
+❌ NO! Because the hacker doesn't have the secret key — they can't produce the correct signature for the new payload
+Server rejects the token → 401 Unauthorized
+
+💎 This is the genius of JWT: The signature isn't there to hide data. It's there to prove the data wasn't changed since the server signed it.
+
+HEADER.PAYLOAD.SIGNATURE
+
+Header   (base64):  Says "I'm signed with HS256"
+Payload  (base64):  Contains user info — readable but tamper-proof
+Signature (hash):   Proves the header + payload weren't modified
+
+A JWT has three parts separated by dots: header, payload, and signature. The header and payload are JSON objects that are Base64-encoded — meaning they're readable to anyone, but they can't be changed without invalidating the token. The signature is generated by hashing the header and payload with a secret key using HMAC-SHA256. Only the server with the secret key can produce a valid signature. So even though anyone can read a JWT's payload, no one can forge or tamper with it without knowing the secret.
+
+🎯 First — What is a "Secret Key"?A secret key is just a long, random string that only the server knows. Nobody else — not the client, not the hacker, nobody.
+
+Example secret key:
+mySuperSecretKey123!@#$%^&*()ThisIsLong&Random&AtLeast256Bits
+
+It's stored in your server's config file (application.yml) and never shared with the outside world.
+# application.yml
+jwt:
+  secret: bXlTdXBlclNlY3JldEtleVRoYXRJc1JlYWxseUxvbmdBbmRTYWZl...
+
+🧮 Now — How is the Signature Created?
+The signature is a one-way hash generated using an algorithm called HMAC-SHA256.
+The formula:
+Signature = HMAC-SHA256(
+    Base64(Header) + "." + Base64(Payload),
+    SECRET_KEY
+)
+
+
+In simple words:
+
+Take the encoded header
+Take the encoded payload
+Join them with a dot: header.payload
+Run them through HMAC-SHA256 along with the secret key
+Out comes a fixed-length hash → that's the signature
+
+
+🧪 Real Example — Step by Step
+
+Let's build a JWT from scratch.
+Step 1: Header
+json{ "alg": "HS256", "typ": "JWT" }
+Base64 encoded:
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+
+Step 2: Payload
+json{ "sub": "user@lib.com", "role": "USER" }
+Base64 encoded:
+eyJzdWIiOiJ1c2VyQGxpYi5jb20iLCJyb2xlIjoiVVNFUiJ9
+
+Step 3: Sign It
+Take header.payload:
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGxpYi5jb20iLCJyb2xlIjoiVVNFUiJ9
+Pass it to HMAC-SHA256 with your secret key:
+HMAC-SHA256(
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGxpYi5jb20iLCJyb2xlIjoiVVNFUiJ9",
+    "mySuperSecretKey123!@#"
+)
+
+Output (the signature):
+TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ
+
+
+Step 4: Final JWT
+Join all three with dots:
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyQGxpYi5jb20iLCJyb2xlIjoiVVNFUiJ9.TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ
+
+That's your JWT! ✅
+
+🧠 The Critical Property — HMAC is DETERMINISTIC
+This is the key idea that makes JWT work:
+
+Same input + Same secret key = Same signature, EVERY time.
+
+🔄 How the Server VERIFIES the Signature
+This is where the magic completes the loop. Here's what happens when a request arrives with a JWT:
+Step 1: Server receives the JWT
+header.payload.signature_from_client
+Step 2: Server splits it into 3 parts
+Step 3: Server takes the header + payload and re-computes the signature using ITS OWN secret key
+recomputed_signature = HMAC-SHA256(header + "." + payload, SECRET_KEY)
+
+Step 4: Server compares both signatures
+if (recomputed_signature.equals(signature_from_client)) {
+    // ✅ TOKEN IS VALID — header and payload weren't tampered with
+} else {
+    // ❌ REJECT — token has been modified or signed with a different key
+    throw new SignatureException();
+}
+That's it. No database lookup. No session storage. Just a math check.
+
+🎯 The Attacker's Dilemma — Why They Can't Forge
+Let's see this from a hacker's view.
+🦹 Attack Attempt #1: Tamper with the payload
+Original token:
+   header.{"role": "USER"}.signature123
+   
+Hacker changes to:
+   header.{"role": "ADMIN"}.signature123   ← same old signature
+
+Server recomputes signature for header.{"role": "ADMIN"} using secret key
+Gets a completely different signature (let's say signatureXYZ)
+Compares signatureXYZ vs signature123 → ❌ MISMATCH
+Server rejects token 🚫
+
+🦹 Attack Attempt #2: Forge a brand new token
+Hacker tries to create a fake JWT from scratch:
+header.{"role": "ADMIN"}.??????
+The hacker doesn't know the secret key. So they have no way to compute the correct signature. They can guess, but HMAC-SHA256 has 2^256 possibilities — that's astronomically impossible to brute-force.
+🚫 Token rejected.
+
+🦹 Attack Attempt #3: Use someone else's signature
+Hacker copies a valid token from a real user but tries to change something:
+
+Same as Attempt #1 → fails because signature won't match modified content.
+
+If they don't change anything → they're just impersonating with the original token, which will work UNTIL it expires (which is why we have short expiration times — usually 24 hours or less).
+
+"The signature is generated using HMAC-SHA256 with a secret key that only the server knows. The algorithm takes the Base64-encoded header and payload as input, combines them with the secret key, and produces a unique fixed-length hash. Because HMAC is deterministic, the same input always produces the same output — so when a request comes in, the server recomputes the signature using its secret key and compares it with the one in the token. If they match, the token is genuine. If anyone tampers with the payload, the recomputed signature won't match, and the token is rejected. Since attackers don't have the secret key, they can't forge a valid signature — making JWT tamper-proof even though the payload itself is readable."
+
+If your API uses plain HTTP (not HTTPS), the token travels in plain text. Anyone on the same WiFi (café, airport) can capture it with tools like Wireshark.
+Hacker injects malicious JavaScript into your website. The script reads the token from localStorage and sends it to the hacker's server.
+
+🔐 Defense #1: HTTPS Everywhere (Non-Negotiable)
+NEVER send JWT over plain HTTP. Always HTTPS.
+	HTTPS encrypts the entire request (including the Authorization header), so even if someone sniffs the network, they see only encrypted garbage
+In Spring Boot, you enforce this:
+	server:
+  		ssl:
+    			enabled: true
+
+⏱️ Defense #2: Short Expiration Times
+🔄 Defense #3: Refresh Token Pattern
+
+This is the industry-standard solution. It's what Google, Facebook, and every modern API uses.
+You issue TWO tokens at login:
+
+Token				Lifespan		Stored Where			Used For
+Access Token (JWT)	Short — 15 minutes	Memory or localStorage		Every API request
+Refresh Token		Long — 7 days		HttpOnly cookie (more secure)	Getting a new access token
+
+
+1. User logs in → server returns access_token (15 min) + refresh_token (7 days)
+2. User makes API calls with access_token
+3. After 15 minutes → access_token expires
+4. Client uses refresh_token → calls /refresh endpoint → gets NEW access_token
+5. Repeat
+
+Even if access token is stolen → only 15 min of damage
+Refresh token is stored in HttpOnly cookie → JavaScript can't read it → safe from XSS
+Refresh tokens can be revoked server-side (stored in DB) — unlike pure JWTs
+
+Best practice for modern apps:
+
+Store access token in memory (JavaScript variable in React state)
+Store refresh token in HttpOnly cookie
+This way, XSS can't steal either one easily
+
+The token visible in your own DevTools is fine because only you have access to your own browser. The problem starts when tokens leak — via XSS, malware, shoulder-surfing, screen sharing, pasting into a chat (👋), committing to GitHub, insecure logging, etc.
+
+So why isn't this a disaster?
+Because getting someone else's token is supposed to be hard. The security model relies on the token staying secret in transit and at rest:
+
+	HTTPS prevents network sniffing.
+	Same-origin policy + CORS prevents random websites from reading your tokens.
+	httpOnly cookies (if used) prevent JavaScript/XSS from stealing them.
+	Short expiry limits damage if one does leak.
+
+ TOPIC 3 — Why JWT is Signed but NOT Encrypted (The Security Mindset)
+
+"JWT looks like a long string of random characters — it must be encrypted, right?"
+✅ JWT is SIGNED (for integrity), NOT ENCRYPTED (for confidentiality).
+The payload is just Base64 encoded — anyone with a browser can decode it.
+
+🤔 So Why Doesn't JWT Encrypt the Payload?
+Great question! There are actually three reasons:
+
+1. Performance
+Encryption is computationally expensive. JWTs are validated on every API request — millions of times a day. Adding encryption would slow things down significantly.
+
+2. HTTPS Already Encrypts in Transit
+When you send the JWT over HTTPS, the entire request is already encrypted by TLS. So in the network, nobody can see the JWT payload. Why encrypt twice?
+
+The only people who can read the decoded JWT payload are:
+	The user themselves (who already knows their info)
+	Your server (which created the token)
+	Anyone with physical access to the user's device (much bigger problem than JWT)
+
+3. JWT is Designed to be Shared
+JWTs are sometimes shared between microservices. Encrypting them would mean every service needs the decryption key — defeating the simplicity of JWT.
+
+🚨 The Golden Rule
+Treat JWT payload like a postcard.
+You can write on it ✍️
+Anyone handling it can read it 👀
+But nobody can change it without breaking the seal (signature) 🔒
+
+❌ NEVER put SENSITIVE data in a JWT:
+
+JWT isn't trying to hide information. JWT is trying to prove identity.
+
+User logs in with password → password verified against DB
+Server gives them a JWT saying "this user is John, role USER, expires in 1 hour"
+On every request, server checks: "Is this token genuine? Has it been tampered with?" (signature check)
+If yes → trust the info inside → process the request
+
+The token doesn't NEED to be hidden because:
+	It only contains info the user already knows about themselves
+	Nobody else can forge a valid one (signature requires the secret key)
+	It expires quickly, limiting any damage from theft
+	It's transported over HTTPS, hiding it from the network
+
+For ultra-sensitive use cases, there's a sibling of JWT called JWE (JSON Web Encryption).
+
+JSON Web Encryption : Payload is encrypted , used in healthcare and financial systems , performance is slower , and it is more complex
+
+A common misconception is that JWT is encrypted, but it's actually only signed. The payload is just Base64 encoded — anyone can decode and read it. The signature ensures the payload hasn't been tampered with, not that it's hidden. That's why we never put sensitive data like passwords or credit card numbers inside a JWT, only identifiers like user ID, email, and role. If true confidentiality is needed, we'd use JWE — JSON Web Encryption — but in practice, HTTPS already protects the token in transit, and the payload only contains info the user already knows about themselves.
+
+"Every time the user hits an API, the server recreates the signature using the token's data + secret key, and checks if it matches the signature in the token."
+
+🔄 What Happens on Every Request
+1. User sends request:
+   GET /api/books
+   Authorization: Bearer eyJhbGc...xyz123signature
+
+2. Server splits the token into 3 parts:
+   - Header:    eyJhbGc...
+   - Payload:   eyJzdWIi...
+   - Signature: xyz123signature
+
+3. Server takes header + payload + SECRET_KEY
+   Computes new signature using HMAC-SHA256
+   Result: xyz123signature (or something different)
+
+4. Server compares:
+   - Recomputed signature == Signature in token?
+   - ✅ Match → token is genuine → proceed
+   - ❌ No match → token tampered → 401 Unauthorized
+
+5. If signature valid → server also checks:
+   - Has the token expired? (check 'exp' claim)
+   - If expired → 401 Unauthorized
+
+6. All good → extract user info from payload → process request
+
+This happens every single time — even for the 1000th request the user makes. The server is stateless, so it has no memory of previous validations. Every request is verified independently.
+
+Because the signature depends on the payload, and the payload includes time-based fields that change every time: Even though it's the same user, with the same role, signed by the same secret key → different signature because the payload (specifically iat and exp) is different.
+
+"When a user logs in, the server creates a JWT with a payload containing the user's identity, role, issued-at time, and expiration. It signs this payload with a secret key and returns the token. The user includes this same token in every subsequent API request. On each request, the server independently recomputes the signature from the header and payload using the same secret key, and compares it to the signature in the token. If they match, and the token isn't expired, the request is authorized. The server doesn't store anything — every request is verified mathematically. When the user logs in again later, a new token is issued with a new timestamp, so its signature is also different — even though it's the same user. The signature is tied to the token's content, not to the user's identity."
+
+TOPIC 4 — JwtUtil Class: generateToken() Method (Code Deep Dive)
+
+src/main/java/com/library/
+├── config/
+│   └── SecurityConfig.java
+├── controller/
+├── service/
+├── util/
+│   └── JwtUtil.java     ← We're building this today
+└── ...
+
+The runtime scope means they're only needed when the app runs, not when you write code.
+
+jwt:
+  secret: bXlTdXBlclNlY3JldEtleVRoYXRJc0F0TGVhc3QyNTZCaXRzTG9uZ0Zvckg5MjU2
+  expiration: 86400000   # 24 hours in milliseconds
+
+🧠 Breakdown:
+jwt.secret — This is your secret key. Important rules:
+
+	Must be at least 256 bits (32 bytes) for HS256 algorithm
+	Should be Base64-encoded (the JJWT library expects this format)
+	In production: load from environment variable like ${JWT_SECRET} — never commit to Git
+
+jwt.expiration — How long the token is valid, in milliseconds:
+	86400000 = 24 × 60 × 60 × 1000 = 24 hours
+	For higher security, use shorter durations like 900000 (15 minutes) with refresh tokens
+
+
+@Component
+public class JwtUtil {
+
+    @Value("${jwt.secret}")
+    private String secretKey;
+
+    @Value("${jwt.expiration:86400000}")
+    private long expirationMs;
+
+    public String generateToken(UserDetails user) {
+        return Jwts.builder()
+                .setSubject(user.getUsername())
+                .setIssuedAt(new Date())
+                .setExpiration(new Date(System.currentTimeMillis() + expirationMs))
+                .signWith(getSigningKey(), SignatureAlgorithm.HS256)
+                .compact();
+    }
+
+    private Key getSigningKey() {
+        return Keys.hmacShaKeyFor(Decoders.BASE64.decode(secretKey));
+    }
+}
+
+.compact();
+
+Finalizes the JWT
+Combines header, payload, and signature into the final string with dots
+Returns: "eyJhbGc...header.eyJzdWIi...payload.abc123...signature"
+
+getSigningKey()
+This builds a proper cryptographic Key object from our secret string. 
+
+1. Jwts.builder() → starts building
+2. setSubject("john@lib.com") → payload: { "sub": "john@lib.com" }
+3. setIssuedAt(now) → payload: { "sub": "john@lib.com", "iat": 1731321000 }
+4. setExpiration(now + 24h) → payload: { "sub": "john@lib.com", "iat": 1731321000, "exp": 1731407400 }
+5. signWith(key, HS256):
+   - Computes header = { "alg": "HS256", "typ": "JWT" }
+   - Encodes header → "eyJhbGciOi..."
+   - Encodes payload → "eyJzdWIiOi..."
+   - Computes signature = HMAC-SHA256("eyJhbGciOi...eyJzdWIiOi...", key)
+6. compact():
+   - Final result: "eyJhbGciOi....eyJzdWIiOi....abc123signature"
+7. Returns the JWT string!
+
+In Spring Boot, I use the JJWT library to create a JwtUtil component. The generateToken() method takes a UserDetails object and uses JJWT's builder pattern to construct the token: I set the subject as the user's email, the issued-at as the current time, the expiration based on a configurable duration, and sign it with HMAC-SHA256 using a Base64-encoded secret loaded from application.yml. The secret is at least 256 bits long for HS256, and in production it's loaded from an environment variable, never hardcoded. The library handles the actual signing math — I just provide the inputs.
+
+TOPIC 5 — JwtUtil Class: validateToken() Method (Code Deep Dive)
+
+public boolean validateToken(String token, UserDetails user) {
+        String username = extractUsername(token);
+        return username.equals(user.getUsername()) && !isExpired(token);
+    }
+
+    public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject);
+    }
+
+    private boolean isExpired(String token) {
+        Date expiration = extractClaim(token, Claims::getExpiration);
+        return expiration.before(new Date());
+    }
+
+    private <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        Claims claims = Jwts.parserBuilder()
+                .setSigningKey(getSigningKey())
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+        return claimsResolver.apply(claims);
+    }
+
+
+💡 Why pass UserDetails? Because the filter has already looked up the user in the DB based on the token's email. This double-check protects against edge cases like the user being deleted but their token still floating around.
+
+💡 Note: The JJWT library also automatically throws ExpiredJwtException when parsing an expired token in extractClaim(). So this method is a double-check — and a clean way to handle the case without exceptions.
+
+extractClaim
+This is the most important method in the whole class — it's where signature verification actually happens. Let's deep dive
+
+.parseClaimsJws(token) 
+
+This single line does 
+	Splits the token into 3 parts (header.payload.signature)
+	Decodes Base64 header → reads which algorithm was used (HS256)
+	Decodes Base64 payload → reads claims
+	Recomputes the signature using the secret key (same process as generateToken())
+	Compares the recomputed signature with the one in the token
+	Throws an exception if they don't match:
+
+SignatureException → tampered token
+MalformedJwtException → corrupted token
+ExpiredJwtException → token expired
+UnsupportedJwtException → wrong algorithm
+IllegalArgumentException → empty/null token
+
+
+The validateToken() method uses JJWT's parser to do three things at once: it splits the token, recomputes the signature using the same secret key used during generation, and compares it with the signature in the token. If the recomputed signature doesn't match, it throws a SignatureException. If the token is expired, it throws ExpiredJwtException. After parsing succeeds, I extract the username (subject claim) and compare it with the user loaded from the database, as a double-check. The beauty is that the server doesn't store any tokens — every request is verified mathematically using just the secret key. This is the core of stateless authentication
+
+I implemented JWT-based authentication in my Library Management System using the JJWT library. I created a JwtUtil component that generates tokens using HMAC-SHA256 with a 256-bit secret loaded from application.yml. The generateToken() method uses JJWT's builder to set the subject (user email), issued-at, and expiration claims, then signs with the secret key. For validation, I use the parser to verify the signature mathematically — if anyone tampers with the payload, the recomputed signature won't match the one in the token, causing the library to throw a SignatureException. Expired tokens are rejected automatically. The whole flow is stateless — no token storage on the server.
+
+
+
+
+
+
+
+
+
+
+
+
+
+

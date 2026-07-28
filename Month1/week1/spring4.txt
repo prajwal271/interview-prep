@@ -1,0 +1,342 @@
+Constructor injection is the recommended approach because it makes dependencies explicit through the constructor signature, allows fields to be final which prevents accidental reassignment and ensures thread safety, and makes classes testable without a Spring context — you just pass mock objects to the constructor. Field injection hides dependencies and is only injectable via Spring's reflection, making unit testing impossible without a full Spring context. In Spring Boot 4.3+, if a class has exactly one constructor, @Autowired is not needed — Spring detects it automatically. Lombok's @RequiredArgsConstructor generates the constructor for all final fields, eliminating boilerplate while keeping all the benefits of constructor injection.
+
+@Value — Reading Config Properties
+Your app has values that change per environment
+
+Max books a user can borrow → 5 in dev, 3 in prod
+Library name → different per branch
+Admin email → different per environment
+SMTP host → localhost in dev, real server in prod
+
+You should NEVER hardcode these in Java
+@Service
+public class BorrowService {
+    private int maxBooksPerUser = 5; // what if prod needs 3?
+    private String adminEmail = "admin@library.com"; // which environment?
+    // To change these = recompile and redeploy the entire app
+    // That's a 10 minute process for a one-line change
+}
+
+The fix — put values in config files, read them in Java
+
+in application.yml
+
+library:
+  name: City Central Library
+  max-books-per-user: 5
+  admin-email: admin@library.com
+  welcome-message: Welcome to our library!
+
+smtp:
+  host: localhost
+  port: 587
+
+VALUE usage 
+
+@Service
+public class LibraryService {
+
+    @Value("${library.name}")
+    private String libraryName;
+
+    @Value("${library.max-books-per-user}")
+    private int maxBooksPerUser;
+
+    @Value("${library.admin-email}")
+    private String adminEmail;
+
+    // If property NOT found → use default value after the colon
+    @Value("${library.missing-property:defaultValue}")
+    private String withDefault;
+    // = "defaultValue" if property doesn't exist in yml
+    // if we have not used default value , if we did not find any value then the application will fail at start up
+ 
+}
+
+
+Depending on the environment , the spring profile will be loaded according to the profile values will be loaded from the yml file
+
+
+@Value Limitations — When It Breaks Down
+
+Works fine for 2-3 properties. But what about 10 properties? 10 separate @Value annotations. No IDE autocompletion on property names. Typo in "${library.nme}" → fails at RUNTIME not compile time. Hard to test — must mock each property separately. Hard to group — scattered across multiple services
+
+`@Value` reads individual properties from `application.yml` or `application.properties` using the `property.key‘syntax.Springauto−convertsthestringvaluetothefield′stype—int,boolean,double,arrays.Youcanprovideadefaultwithacolon:‘{property.key}` syntax. Spring auto-converts the string value to the field's type — int, boolean, double, arrays. You can provide a default with a colon: `
+property.key‘syntax.Springauto−convertsthestringvaluetothefield′stype—int,boolean,double,arrays.Youcanprovideadefaultwithacolon:‘{key:default}`. Without a default, if the property is missing the app fails at startup — which is intentional for required config. For a few properties `@Value` is fine, but for many related properties `@ConfigurationProperties` is better — it groups them in one class with IDE autocompletion and compile-time safety.
+
+This is exactly what @ConfigurationProperties solves.
+
+Imagine your Library app grows. You now have 10 related config properties
+
+library:
+  name: City Central Library
+  max-books-per-user: 5
+  admin-email: admin@library.com
+  fine-per-day: 2.50
+  open-days: MON,TUE,WED,THU,FRI
+  address: 123 Main Street
+  phone: +91-9999999999
+  website: www.citylibrary.com
+  branch-count: 3
+  founded-year: 1995
+
+With @Value you'd write:
+
+@Service
+public class LibraryService {
+    @Value("${library.nme}")           private String name;
+    @Value("${library.max-books-per-user}") private int maxBooks;
+    @Value("${library.admin-email}")    private String adminEmail;
+    @Value("${library.fine-per-day}")   private double finePerDay;
+    @Value("${library.open-days}")      private String[] openDays;
+    @Value("${library.address}")        private String address;
+    @Value("${library.phone}")          private String phone;
+    @Value("${library.website}")        private String website;
+    @Value("${library.branch-count}")   private int branchCount;
+    @Value("${library.founded-year}")   private int foundedYear;
+    // 10 annotations — messy, error prone, no autocompletion
+}
+
+but typo in the first property only while writing user will make a mistake , fails at RUNTIME it will stop initially only , cannot debug also one by one as so many variables are there 
+
+The Solution — @ConfigurationProperties
+
+Bundle ALL related config into ONE class:
+
+Step 1 — Create the Properties Class
+
+@ConfigurationProperties(prefix = "library")
+@Component
+@Data  // Lombok generates ALL getters, setters, toString, equals
+public class LibraryProperties {
+
+    // Field names map to yml keys automatically
+    // library.name → name
+    // library.max-books-per-user → maxBooksPerUser (camelCase ↔ kebab-case)
+    // library.fine-per-day → finePerDay
+
+    private String name;
+    private int maxBooksPerUser;
+    private String adminEmail;
+    private double finePerDay;
+    private List<String> openDays;
+    private String address;
+    private String phone;
+    private String website;
+    private int branchCount;
+    private int foundedYear;
+}
+
+Application.yml
+
+library:
+  name: City Central Library
+  max-books-per-user: 5
+  admin-email: admin@library.com
+  fine-per-day: 2.50
+  open-days:
+    - MON
+    - TUE
+    - WED
+    - THU
+    - FRI
+  address: 123 Main Street
+  phone: +91-9999999999
+  website: www.citylibrary.com
+  branch-count: 3
+  founded-year: 1995
+
+
+This is called relaxed binding — Spring handles the conversion automatically.
+
+
+Validation — The Killer Feature
+This is what makes @ConfigurationProperties truly powerful over @Value
+
+@ConfigurationProperties(prefix = "library")
+@Component
+@Data
+@Validated  // enable validation on config properties
+public class LibraryProperties {
+
+    @NotBlank(message = "Library name cannot be empty")
+    private String name;
+
+    @Min(value = 1, message = "Must allow at least 1 book")
+    @Max(value = 20, message = "Cannot allow more than 20 books")
+    private int maxBooksPerUser;
+
+    @Email(message = "Admin email must be valid")
+    private String adminEmail;
+
+    @DecimalMin("0.0")
+    private double finePerDay;
+}
+
+Use this dependency in pom and then add the bean class and then if you try to add the keys in application.yml it will autocomplete the whole thing
+
+
+<!-- Generates metadata for IDE autocompletion -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-configuration-processor</artifactId>
+    <optional>true</optional>
+</dependency>
+
+`@ConfigurationProperties` binds a group of related properties from `application.yml` to a single Java class using a prefix. Unlike `@Value` which handles one property at a time, `@ConfigurationProperties` gives you a typed object with IDE autocompletion, relaxed binding between kebab-case YAML keys and camelCase Java fields, support for nested objects and lists, and validation via `@Validated`. This makes it far superior for managing multiple related properties — the config is grouped in one place, testable by just instantiating the class, and errors are caught at startup not runtime.
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+								What is Dynamic Programming?
+DP : If I already calculated something — remember it. Never calculate it twice.
+
+    You are climbing a staircase with n steps.
+    Each time you can climb 1 or 2 steps.
+    How many distinct ways can you climb to the top?
+    n=1 → 1 way:  (1)
+    n=2 → 2 ways: (1+1), (2)
+    n=3 → 3 ways: (1+1+1), (1+2), (2+1)
+    n=4 → 5 ways: (1+1+1+1), (1+1+2), (1+2+1), (2+1+1), (2+2)
+    n=5 → 8 ways
+
+1,1,2,3,5,8 ---> This is a Fibonacci series sum of the previous 2 will give the current number , then apply this idea only to find the no of ways to climb 5 stairs I need to know no of ways to climb 3 stairs and 4 stairs 
+
+The Naive Approach — Recursion
+"To find ways(5), I need ways(4) and ways(3)"
+"To find ways(4), I need ways(3) and ways(2)"
+"To find ways(3), I need ways(2) and ways(1)"
+
+Single Number 
+
+In Java, ^ is the bitwise XOR (exclusive OR) operator. It compares each bit of two operands and returns 1 if the bits are different, and 0 if they are the same.
+
+int a = 5;  // 0101 in binary
+int b = 3;  // 0011 in binary
+
+int result = a ^ b; // 0110 = 6
+```
+
+Bit-by-bit breakdown:
+```
+  0101  (5)
+^ 0011  (3)
+------
+  0110  (6)
+^ 0011  (3)
+------
+  0101  (5) 
+
+means if we are using xor operator again o same element the previous element cancels / a ^ a = 0
+
+Bitwise operators
+
+int a = 5;  // 0101
+int b = 3;  // 0011
+
+Bitwise AND : a & b   // 0001 = 1   (AND)
+Bitwise OR : a | b   // 0111 = 7   (OR)
+Bitwise XOR : a ^ b   // 0110 = 6   (XOR)
+Bitwise NOT : ~a      // ...11111010 = -6  (NOT, flips all 32 bits)
+
+a << 1  // 1010 = 10  (multiply by 2)
+a >> 1  // 0010 = 2   (divide by 2)
+a >>> 1 // 0010 = 2   (same here, but differs for negative numbers)
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SQL
+
+Id we have selected auto increment or autogenerated so we should not give any value for that if that gets generated and we need to see that value we need to use this query
+
+-- Insert and immediately get the generated id
+INSERT INTO books (title, author)
+VALUES ('SICP', 'Abelson')
+RETURNING id, title;
+
+// Your Java code:
+Book book = new Book("Clean Code", "Robert Martin");
+Book saved = bookRepository.save(book);
+System.out.println(saved.getId()); // how does Spring know the id?
+
+// Hibernate runs this SQL behind the scenes:
+INSERT INTO books (title, author, available)
+VALUES ('Clean Code', 'Robert Martin', true)
+RETURNING id;
+// Gets back id=5 → sets it on your Book object → returns it
+
+
+UPDATE books
+SET    available = FALSE
+WHERE  id = 1;
+
+
+DELETE:
+→ Removes rows ONE BY ONE
+→ Transactional — can ROLLBACK
+→ Fires row-level triggers
+→ Slower on large tables
+→ WHERE clause supported
+→ SAFE to use in application code ✅
+
+DELETE:
+→ Removes rows ONE BY ONE
+→ Transactional — can ROLLBACK
+→ Fires row-level triggers
+→ Slower on large tables
+→ WHERE clause supported
+→ SAFE to use in application code ✅
+
+Interview answer:
+"DELETE is transactional and supports WHERE —
+ safe for application code.
+ TRUNCATE removes all rows instantly,
+ cannot be rolled back safely,
+ and doesn't fire triggers.
+ We never use TRUNCATE in application code —
+ only for test data cleanup in dev environments
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,44 @@
+borrow-service is the conductor. It doesn't OWN user data. It doesn't OWN book data. It owns the BORROW RECORD. But to do its job, it must call user-service (step 1) and book-service (steps 2-4), then save its own record (step 5).
+
+There is no ManytoOne and OneToMany relationships in Microservices
+In microservices, that's IMPOSSIBLE. You just store the ID and let the application layer fetch related data when needed. Referential integrity moves OUT of the database and INTO the application code. This is the database-per-service rule in action — write this down for interviews.
+
+In a real system I'd handle this with the Saga pattern — define compensating transactions for each step. If a downstream step succeeds but a later step fails, the saga runs compensations to undo earlier steps. The simpler approach we have right now relies on the rarity of mid-operation failures and would need hardening for production. Kafka or a workflow engine like Camunda is typical for production sagas.
+
+When a user borrows a book, borrow-service does FOUR things:
+
+Validates the user (sync call to user-service)
+Decrements book availability (sync call to book-service)
+Saves the borrow record locally
+(Imaginary) Sends a confirmation email
+
+What if the email service is down? Does the borrow fail? Should a working borrow be rejected because an email couldn't be sent?
+What if you want to ALSO update analytics? Notify another team? Trigger a recommendation engine? You'd have to keep adding sync calls. The borrow gets slower every time someone needs the data.
+Tight coupling. borrow-service must KNOW about email-service, analytics-service, recommendation-service. It depends on all of them.
+
+The Async Mindset Shift
+Asynchronous messaging flips the model. Instead of borrow-service calling email-service directly, borrow-service just announces what happened:
+Hey, a book was borrowed. User 5 borrowed book 10 at 10:30 AM
+
+It puts this announcement somewhere safe and continues immediately. Whoever cares listens. Email-service might pick it up and send an email. Analytics-service might pick it up and update dashboards. Recommendation-service might pick it up and update recommendations. borrow-service doesn't know or care who's listening.
+
+public BorrowResponse createBorrow(...) {
+    fetchUser(...);              // 50ms
+    borrowBookCopy(...);         // 80ms
+    save(...);                   // 30ms
+    publishEvent("book-borrowed", ...);  // 5ms — just dropping a message
+    return response;             // total: 165ms
+}
+
+The borrow returns in 165ms. The email is sent SECONDS LATER by email-service, asynchronously, on its own schedule.
+This is event-driven architecture. Services emit events. Other services react to events. Nobody calls anybody directly for "side effect" work.
+
+Part 3: Build notification-service
+This service is purely event-driven. It just listens to Kafka topics and reacts. It doesn't expose any API to clients. Real-world parallel: think of an "email-sending worker" or "background processor" — it runs, listens, processes, with no HTTP-facing surface.
+
+notification-service will:
+Subscribe to a Kafka topic called book-borrowed
+When a message arrives, log it AND save a record to the database ("we processed this event")
+Subscribe to a second topic book-returned
+Same — log + save
+

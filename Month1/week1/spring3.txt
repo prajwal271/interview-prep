@@ -1,0 +1,133 @@
+Auto-configuration DECIDES to create DataSource , but connecting to the actual database requires datasource url and password
+
+Spring Boot has 150+ auto-configuration classes ,Each checks: "Is the required class on the classpath?" , 
+
+If nothing is mentioned
+Auto-configuration fires → tries to create DataSource
+Reads spring.datasource.url → NOT FOUND
+Spring Boot falls back to defaults:
+Looks for H2 jar on classpath (in-memory DB)
+If H2 found → creates in-memory DataSource automatically
+No credentials needed (H2 needs none)
+App starts ✅ but data is lost on restart
+
+If H2 NOT on classpath:
+→ Cannot create DataSource
+→ App FAILS at startup with:
+
+spring-boot-starter-data-jpa added
+@EnableAutoConfiguretion Auto-config decides to create DataSource 
+spring.datasource.url provided then go with that else h2 dependency is there use that , both are not there fail at start up
+
+							~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+							Spring Profiles — Same Code, Different Config 
+
+You have one Spring Boot app. But it runs in multiple environments: 
+Your laptop    → development  (H2 in-memory, debug logs, port 8080)
+Test server    → staging      (PostgreSQL test DB, some logging)
+Production     → prod         (PostgreSQL real DB, minimal logs, port 80)
+
+Without profiles — you'd manually change application.properties every time you deploy. 
+What if you doesn't change the datasource url before deploying that time problems occur
+
+The Solution — Separate Config Files Per Environment
+src/main/resources/
+├── application.yml          ← common config (shared everywhere)
+├── application-dev.yml      ← dev only config
+├── application-staging.yml  ← staging only config
+└── application-prod.yml     ← prod only config
+
+Activating a Profile — 3 Ways
+	1) In YML 
+		 spring:
+  		     profiles:
+    			active: dev
+	2) In command line
+		java -jar library-app.jar --spring.profiles.active=prod
+		java -jar library-app.jar --spring.profiles.active=staging
+	3) Environment variable (for Docker/Kubernetes):
+		export SPRING_PROFILES_ACTIVE=prod
+		docker run -e SPRING_PROFILES_ACTIVE=prod library-app.jar
+
+What Happens If No Profile is Active? :  Spring uses "default" profile automatically ,You can provide defaults for it: application-default.yml
+
+Spring Profiles allow the same codebase to behave differently across environments. You create profile-specific config files like `application-dev.yml` and `application-prod.yml`. Spring loads `application.yml` as the base and merges the active profile's file on top, with the profile values overriding the base. The active profile is set via `spring.profiles.active` in config, command line, or environment variables — command line always takes priority. `@Profile` on beans means that bean is only created when that profile is active — useful for swapping implementations like `MockEmailService` in dev and `SmtpEmailService` in prod.
+
+we can use @Profile("dev") on a specific bean so that that bean will be initiated when that profile is activated
+
+The same codebase needs to behave differently across different environments like development, staging, and production. In development you want an in-memory database, debug-level logging, mock email services so you don't accidentally email real users, and the app running on port 8080. In production you want a real PostgreSQL database with credentials pulled from environment variables, minimal logging for performance, real email sending, and running on port 80. Without profiles you'd manually change configuration every time you deploy . A developer could forget to switch the database URL and production traffic could hit a development database.
+Profiles let you define separate configuration files per environment. Spring always loads the base application.yml first as the common foundation — things that never change across environments. Then it loads the active profile's file on top, and those values override the base. So application-prod.yml overrides only what's different in production — you don't repeat yourself.
+You can also use the @Profile annotation directly on beans. This means that bean is only created when that specific profile is active. A MockEmailService only exists in dev. A SmtpEmailService only exists in prod. The rest of your application doesn't know or care which one it gets — it just talks to the EmailService interface.
+The active profile is set via a property, environment variable, or command line argument — and command line always wins. This is important for CI/CD pipelines where the deployment script controls which profile activates — not the code itself.
+
+PROFILE means switching environment accordingly 
+
+					~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SQL Pagination
+
+OFFSET pagination : 
+
+next 3 books (skip first 3)
+SELECT title, author
+FROM books
+ORDER BY title ASC
+LIMIT 3 OFFSET 3;
+		
+Even though you only want 10 rows — the DB still reads and discards all the skipped rows. OFFSET doesn't jump — it counts.
+
+Cursor-based pagination:
+
+-- Instead of OFFSET — use WHERE with last seen id
+-- Page 1:
+SELECT id, title, author
+FROM books
+WHERE available = TRUE
+ORDER BY id ASC
+LIMIT 10;
+-- Returns rows with id 1..10. Last id = 10.
+
+-- Page 2: pass last_id = 10
+SELECT id, title, author
+FROM books
+WHERE available = TRUE
+AND   id > 10          -- skip everything before last seen id
+ORDER BY id ASC
+LIMIT 10;
+-- Uses index on id → jumps directly → always fast ✅
+
+OFFSET pagination:    simple but slow on deep pages
+Cursor pagination:    always fast, but cannot jump to page 50
+                      used for infinite scroll (Twitter, Instagram)
+
+
+
+How does Spring Data JPA pagination work?
+PageRequest.of(page, size) generates two SQL queries —
+one data query with LIMIT {size} OFFSET {page×size}
+and one count query for total elements.
+For large datasets, OFFSET is inefficient because
+the database still scans all skipped rows.
+Cursor-based pagination using WHERE id > last_id
+with an index is faster for deep pages —
+this is what Instagram and Twitter use for
+infinite scroll.
+
+
+
+
+ Why can't you test a class that uses field injection without Spring?
+ User will not know what beans are injected. And for testcases spring will never run and nobody has injected it , if it is private no constructor means nobody injected it . It is a private variable and no setter is used so from outside you cannot set it / it is not accessible , it will be set only through spring reflection .That is why we should not use field injection.
+
+Constructor injection is the recommended approach because it makes dependencies explicit through the constructor signature, allows fields to be final which prevents accidental reassignment and ensures thread safety, and makes classes testable without a Spring context — you just pass mock objects to the constructor. Field injection hides dependencies and is only injectable via Spring's reflection, making unit testing impossible without a full Spring context. In Spring Boot 4.3+, if a class has exactly one constructor, @Autowired is not needed — Spring detects it automatically. Lombok's @RequiredArgsConstructor generates the constructor for all final fields, eliminating boilerplate while keeping all the benefits of constructor injection
+
+
+
+
+
+
+
+
+
+
+
+

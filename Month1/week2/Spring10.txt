@@ -1,0 +1,134 @@
+Topic 1: @ControllerAdvice + @ExceptionHandler + Custom Exceptions
+When an exception has occurred in your code it will throw that exception which means 500 Internal server error 
+This is Spring's White Label Error — ugly, inconsistent, exposes internals
+Instead of this you want 
+404 resource not found
+{
+  "status": 404,
+  "message": "Book not found with id: 99",
+  "timestamp": "2024-01-10T10:30:00",
+  "path": "/api/books/99"
+}
+Clean. Consistent. Professional. Every error looks the same.
+
+Part 1 — Custom Exceptions
+Why custom only why not generic Exception
+
+→ Tells you nothing about what type of error
+→ Cannot handle specifically
+→ Always becomes 500 even if it's a 404, or some other error
+
+Custom exceptions:
+throw new ResourceNotFoundException("Book", "id", 99);
+→ Clear meaning
+→ Can map to specific HTTP status
+→ 404 for not found, 409 for conflict etc.
+
+Part 2 — ErrorResponse DTO
+Before building the handler — create a consistent error response shape:
+
+Part 3 — @ControllerAdvice — The Global Handler
+What is @ControllerAdvice?
+Normal flow:
+Request → Controller → throws Exception → 💥 ugly error
+
+With @ControllerAdvice:
+Request → Controller → throws Exception
+                           ↓
+                    @ControllerAdvice intercepts
+                           ↓
+                    @ExceptionHandler runs
+                           ↓
+                    Clean JSON error response ✅
+
+@ControllerAdvice sits ACROSS all controllers
+One class handles exceptions for the ENTIRE application
+No try-catch in every controller method
+
+@ControllerAdvice is a Spring annotation that allows you to handle cross-cutting concerns across multiple controllers in a centralized way — essentially a global exception handler for your entire application
+
+Instead of handling exceptions, data binding, or model attributes inside every controller, you define them once in a @ControllerAdvice class and Spring applies them globally.
+
+@RestControllerAdvice = @ControllerAdvice + @ResponseBody
+@RestControllerAdvice : Always returns JSON/XML (like @RestController) , used in REST APIs
+@ControllerAdvice always returns @ResponseBody , used in MVC
+
+Multiple @ControllerAdvice classes can coexist — use @Order to prioritize them
+Annotated with @Component, so it's auto-detected by Spring's component scan
+@ExceptionHandler inside a @ControllerAdvice has higher priority than one inside a regular controller... wait, actually it's the opposite — controller-level handlers take priority over global ones.
+
+@ExceptionHandler is a Spring annotation used to handle specific exceptions thrown by controller methods. It lets you define a method that gets invoked automatically when a particular exception occurs.
+
+Part 4 — Update Controllers to Throw Exceptions
+
+After GlobalExceptionHandler:
+GET /api/books/999
+
+HTTP 404 Not Found
+{
+  "status": 404,
+  "message": "Book not found with id: '999'",
+  "timestamp": "2024-01-10T10:30:00",
+  "path": "/api/books/999"
+}
+
+
+Spring checks handlers in order:
+1. Is it ResourceNotFoundException? → use that handler
+2. Is it BadRequestException?       → use that handler
+3. Is it anything else?             → use Exception handler
+
+Always put specific exceptions FIRST
+General Exception LAST as safety net
+
+
+How @ControllerAdvice works internally
+
+Controller throws ResourceNotFoundException
+         ↓
+Spring's DispatcherServlet catches it
+         ↓
+Asks HandlerExceptionResolver:
+"Which @ExceptionHandler handles this?"
+         ↓
+Finds @ExceptionHandler(ResourceNotFoundException.class)
+in @ControllerAdvice class
+         ↓
+Calls that method with the exception
+         ↓
+Method returns ResponseEntity with ErrorResponse
+         ↓
+Jackson converts ErrorResponse → JSON
+         ↓
+Client receives clean 404 JSON response
+
+
+@ControllerAdvice is a global exception handling mechanism in Spring MVC. Without it, unhandled exceptions return Spring's ugly white-label error page. With @ControllerAdvice, you define @ExceptionHandler methods that intercept specific exceptions thrown from ANY controller. This gives you one central place to handle all errors consistently — same error response structure every time. Custom exceptions like ResourceNotFoundException extend RuntimeException and map to specific HTTP status codes. The most specific handlers go first, with a general Exception handler as a safety net for anything unexpected.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

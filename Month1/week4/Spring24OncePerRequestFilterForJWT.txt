@@ -1,0 +1,457 @@
+🔹 TOPIC 1 — The Big Picture: Where Does the JWT Filter Fit?
+
+❓ "Who is actually CALLING validateToken() on every API request?"
+
+Without JWT Filter
+Currently, when a user hits your API:
+
+Client                Server
+  │
+  │  GET /api/books
+  │  Authorization: Bearer eyJhbGc...
+  │ ──────────────────────────────────▶ DispatcherServlet
+  │                                              │
+  │                                              ▼
+  │                                       BookController
+  │                                              │
+  │                                              ▼
+  │  ◀──────── 200 OK (books list) ──── Returns books
+
+❌ Nobody checked the token! The header was just ignored. Any random person could call the API. The token is sitting in the Authorization header, but no one extracted it
+
+WITH JWT Filter 
+
+Client                                Server
+  │
+  │  GET /api/books
+  │  Authorization: Bearer eyJhbGc...
+  │ ──────────────────────────────────▶ 🔍 JwtAuthenticationFilter
+  │                                              │
+  │                                              │ 1. Extract token from header
+  │                                              │ 2. Validate signature & expiry
+  │                                              │ 3. Load user from DB
+  │                                              │ 4. Set SecurityContext
+  │                                              ▼
+  │                                       DispatcherServlet
+  │                                              │
+  │                                              ▼
+  │                                       BookController
+  │                                              │
+  │                                              │ Knows WHO is logged in! ✅
+  │                                              ▼
+  │  ◀──────── 200 OK (books list) ──── Returns books
+
+✅ Now every request is intercepted, verified, and identified before reaching your business code.
+
+🧠 What is a "Filter" in Spring?
+A Filter is a piece of code that sits between the client and your controller. Think of it like an airport security check:
+
+Filters can:
+Inspect the incoming request (read headers, body)
+Modify the request (add headers, change params)
+Block the request (return 401 directly)
+Pass it along to the next filter or controller
+
+The Spring Security Filter Chain
+Spring Security adds ~15 filters by default. Together, they form a chain, and each request passes through all of them in order.
+
+Request
+  │
+  ▼
+[1] SecurityContextPersistenceFilter
+  │
+  ▼
+[2] LogoutFilter
+  │
+  ▼
+[3] 🆕 JwtAuthenticationFilter (← OUR filter we add here)
+  │
+  ▼
+[4] UsernamePasswordAuthenticationFilter (for /login form)
+  │
+  ▼
+[...] More filters (authorization, exception handling, etc.)
+  │
+  ▼
+Controller
+
+Build the JwtAuthenticationFilter
+Insert it into Spring's filter chain at the right place
+
+We'll plug it in before UsernamePasswordAuthenticationFilter because we want our JWT check to happen first.
+
+For every single incoming request, our filter will:
+
+Check if there's an Authorization: Bearer <token> header
+If no token → just pass the request along (some endpoints are public, like /api/auth/register)
+If token exists → extract it
+Validate the token using JwtUtil (signature + expiry)
+If valid → load the user from the database
+Set the user as "authenticated" in Spring's SecurityContext
+Forward the request to the next filter / controller
+
+💡 By the time your controller runs, Spring knows who the user is. You can call SecurityContextHolder.getContext().getAuthentication() from anywhere in your code to access the current user.
+
+🤔 Why Filter and Not Just Annotate Each Controller?
+🎯 This is called "Cross-Cutting Concerns" in architecture. Authentication, logging, metrics — all cross-cutting. They apply to ALL requests, so we handle them with filters, not in business code.
+
+Filter			Code that runs before controllers, inspects/modifies requests
+FilterChain		The sequence of filters a request passes through
+OncePerRequestFilter	A special filter class that runs exactly once per request (we'll explain why this matters in Topic 2)
+SecurityContext 	Spring's "memory" of who is currently logged in (per-request)
+SecurityContextHolder	Thread-local storage for the SecurityContext
+Authentication		An object representing "this user is logged in with these roles"
+UserDetails		Spring's standard interface for "a user with username, password, and roles"
+UserDetailsService	A service that knows how to load a user from your DB by username
+
+
+In Spring Security, JWT authentication is implemented as a custom filter — JwtAuthenticationFilter — that extends OncePerRequestFilter. It runs before the DispatcherServlet on every request, extracts the Bearer token from the Authorization header, validates it using my JwtUtil class, loads the user from the database via UserDetailsService, and sets the authenticated user in Spring's SecurityContextHolder. By the time the controller runs, Spring already knows who the user is and what roles they have. This keeps authentication completely separate from business logic — it's a clean cross-cutting concern.
+
+If a user's token is missing, the filter should immediately reject with 401 ❌ FALSE (it should just skip — some endpoints are public)
+
+🔹 TOPIC 2 — OncePerRequestFilter Deep Dive
+"Why does Spring have a class called OncePerRequestFilter? Doesn't every filter naturally run once per request?"
+
+NO! A single HTTP request can actually pass through the same filter multiple times. Let me show you why this happens.
+In Spring web apps, a single client request can trigger internal redirects, forwards, or includes behind the scenes. Each of these can re-trigger the entire filter chain.
+
+📋 Real Scenarios Where a Filter Runs Multiple Times:
+1. Server-side Forward (RequestDispatcher.forward())
+
+@GetMapping("/old-endpoint")
+public String oldEndpoint(HttpServletRequest req, HttpServletResponse res) {
+    req.getRequestDispatcher("/new-endpoint").forward(req, res);
+    return null;
+}
+
+Client makes 1 request: GET /old-endpoint
+Server forwards to /new-endpoint internally
+The filter chain runs TWICE! Once for /old-endpoint, once for /new-endpoint
+
+2. Async Servlets (@Async requests)
+Async dispatches re-enter the filter chain
+Without protection → filter runs multiple times
+
+3. Error Handling Redirects (/error page)
+Exception thrown → Spring forwards to /error
+Filter chain runs again for the error page
+
+4. Include Dispatching (JSP includes, etc.)
+Same problem — filter chain re-triggers
+
+JWT filter runs twice for the same request :
+
+🐛 Run 1 (Original request):
+1. Extract token from header
+2. Validate token ✅
+3. Load user from DB (1 query)
+4. Set SecurityContext → user is now "logged in"
+
+🐛 Run 2 (After internal forward):
+1. Extract token from header (same one)
+2. Validate token ✅ (but we already did this!)
+3. Load user from DB (DUPLICATE QUERY! 💸)
+4. Set SecurityContext (already set!)
+
+Performance: Duplicate DB queries on every request 💸
+Log spam: Same authentication logged twice
+Race conditions: SecurityContext gets re-set, possibly with different state
+Debugging hell: "Why is my user loading twice?"
+
+✨ The Solution — OncePerRequestFilter
+It's a Spring class that guarantees your filter runs exactly once per HTTP request, no matter how many internal forwards/includes/dispatches happen.
+Internally, it uses a clever trick: it sets an attribute on the request object the first time it runs. On subsequent runs (in the same request), it checks for that attribute — if present, it skips execution.
+
+public abstract class OncePerRequestFilter implements Filter {
+    
+    @Override
+    public final void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) {
+        String alreadyFilteredAttributeName = getAlreadyFilteredAttributeName();
+        
+        if (req.getAttribute(alreadyFilteredAttributeName) != null) {
+            // Already ran in this request → just pass through
+            chain.doFilter(req, res);
+            return;
+        }
+        
+        // First time → mark request as filtered, then run our logic
+        req.setAttribute(alreadyFilteredAttributeName, Boolean.TRUE);
+        try {
+            doFilterInternal(req, res, chain);   // ← OUR CODE GOES HERE
+        } finally {
+            req.removeAttribute(alreadyFilteredAttributeName);
+        }
+    }
+    
+    // We implement THIS, not doFilter():
+    protected abstract void doFilterInternal(...);
+}
+
+We override doFilterInternal() instead of doFilter(). Spring handles the "once per request" check before calling our code.
+
+Filter vs OncePerRequestFilter — When to Use Which?
+
+Aspect						Filter (basic interface)					OncePerRequestFilter
+Runs multiple times per request?		✅ Yes (potentially)						❌ No (guaranteed once)
+Method to override				doFilter()							doFilterInternal()
+For authentication?				❌ Risky — duplicate auth checks				✅ Perfect choice
+For logging?					⚠️ Will log duplicates						✅ Logs each request once
+For metrics?					⚠️ Inflated counts						✅ Accurate counts
+Performance					⚠️ Could cause duplicate work					✅ Efficient
+
+Almost always use OncePerRequestFilter for any Spring filter you write. It's just safer and more predictable.
+
+🛠️ The Method We Override
+@Override
+protected void doFilterInternal(
+    HttpServletRequest request,
+    HttpServletResponse response,
+    FilterChain filterChain
+) throws ServletException, IOException {
+    // Our JWT logic goes here
+    filterChain.doFilter(request, response);  // ← MUST call this to continue
+}
+
+🔍 The Three Parameters:
+1. HttpServletRequest request
+
+Represents the incoming HTTP request
+Used to read headers, parameters, body, cookies
+Example: request.getHeader("Authorization") → reads the JWT
+
+2. HttpServletResponse response
+
+Represents the outgoing HTTP response
+Used to set status codes, write response body, add headers
+Example: response.setStatus(401) → reject the request directly
+
+3. FilterChain filterChain 🔑
+
+The "next" link in the chain
+filterChain.doFilter(request, response) → pass control to the next filter/controller
+⚠️ CRITICAL: If you forget to call this, the request dies in your filter. No controller runs, no response goes back. The client just times out. 💀
+
+
+Result: Client sends request → goes into filter → filter does its thing → NOTHING happens after → request hangs → client times out → user sees "Connection refused" or similar.
+✅ Always end your filter with:
+chain.doFilter(req, res);
+
+Client                Spring Filter Chain
+  │
+  │  HTTP Request
+  │ ─────────────▶ [SecurityContextFilter]
+  │                          │
+  │                          ▼
+  │                 [OurJwtFilter] ← OncePerRequestFilter
+  │                          │
+  │                          │ doFilterInternal() runs ONCE
+  │                          │ (even if dispatch happens later)
+  │                          │
+  │                          │ chain.doFilter() called ↓
+  │                          ▼
+  │                 [Other Filters]
+  │                          │
+  │                          ▼
+  │                 [DispatcherServlet]
+  │                          │
+  │                          ▼
+  │                 [Controller]
+  │                          │
+  │                          ▼
+  │ ◀────── Response ───── Generated
+
+
+
+The "already filtered" attribute is named after the class name of your filter. So:
+
+JwtAuthenticationFilter → attribute = "JwtAuthenticationFilter.FILTERED"
+LoggingFilter → attribute = "LoggingFilter.FILTERED"
+
+This means each filter has its own "ran once" flag — they don't interfere with each other.
+
+OncePerRequestFilter is a Spring base class that guarantees a filter runs exactly once per HTTP request, even when internal forwards, includes, or async dispatches happen. Without it, a filter could execute multiple times for a single client request, causing duplicate DB queries, redundant authentication, and incorrect logging. It works by setting a request attribute the first time it runs, and skipping execution on subsequent invocations. For JWT authentication, I extend OncePerRequestFilter and override doFilterInternal(), which gives me access to the request, response, and filter chain. I always call chain.doFilter() at the end to pass the request to the next filter — forgetting this would hang the request indefinitely
+
+🔹 TOPIC 3 — Building JwtAuthenticationFilter Line by Line
+
+
+src/main/java/com/library/
+├── config/
+├── controller/
+├── security/
+│   └── JwtAuthenticationFilter.java   ← We're building this now
+├── service/
+├── util/
+│   └── JwtUtil.java                   ← Yesterday's class
+└── ...
+
+
+@RequiredArgsConstructor (Lombok)
+Auto-generates a constructor for all final fields
+Without it, we'd manually write:
+
+💡 Why final? Because these dependencies are injected at startup and shouldn't change later. final + constructor injection = immutable, testable, thread-safe class.
+
+@Override
+protected void doFilterInternal(
+        HttpServletRequest request,
+        HttpServletResponse response,
+        FilterChain filterChain
+) throws ServletException, IOException {
+
+@Override → we're overriding the abstract method from OncePerRequestFilter
+protected → only Spring and subclasses can call this directly
+3 parameters → request (incoming), response (outgoing), filterChain (next step in chain)
+
+CRITICAL DESIGN DECISION: We don't reject unauthenticated requests here. We just skip. Why?
+Because rejecting at the filter level would block all public endpoints. Spring's authorization layer (which runs later) will reject if the endpoint requires authentication.
+
+Asks our UserDetailsService to fetch the user from the DB by email
+Returns a UserDetails object (Spring's standard "user" interface)
+If the user doesn't exist → throws UsernameNotFoundException
+
+🤔 Wait — why hit the DB on every request? Isn't JWT supposed to be stateless?
+Excellent point. The reasons:
+
+Roles might have changed since the token was issued (user got promoted to ADMIN)
+User might be disabled in the DB (banned/locked)
+User might be deleted entirely
+
+The JWT proves "someone with this email used to exist." But we check the DB to confirm they still exist and are active.
+
+⚡ Performance tip: In high-traffic apps, you'd cache UserDetails in Redis with a short TTL (e.g., 60 seconds). For now, direct DB calls are fine.
+
+HTTP Request comes in
+         ↓
+    [Step 1] Read "Authorization" header
+         ↓
+    [Step 2] Has "Bearer "? ──── NO ──→ Skip, pass to next filter
+         ↓ YES
+    [Step 3] Extract JWT (after "Bearer ")
+         ↓
+    [Step 4] Get username from JWT (also verifies signature)
+         ↓
+    [Step 5] User exists & no one authenticated yet?
+         ↓ YES
+    [Step 6] Load user from DB via UserDetailsService
+         ↓
+    [Step 7] validateToken() → matches user, not expired?
+         ↓ YES
+    [Step 8] Create UsernamePasswordAuthenticationToken
+         ↓
+    [Step 9] Attach IP/session details
+         ↓
+    [Step 10] Set in SecurityContextHolder ✅ USER AUTHENTICATED
+         ↓
+    [Step 11] Pass to next filter / controller
+         ↓
+    Controller runs (knows who user is)
+         ↓
+    Response sent back
+
+My JwtAuthenticationFilter extends OncePerRequestFilter and overrides doFilterInternal(). The flow is: extract the Bearer token from the Authorization header — if missing, just pass through (some endpoints are public). Otherwise, I parse the token using JwtUtil to get the username, which also verifies the signature. Then I check if no user is already authenticated, load the full user from the database via UserDetailsService (because roles or status might have changed since token issuance), validate the token, and if everything checks out, I create a UsernamePasswordAuthenticationToken and set it in the SecurityContextHolder. From this point on, Spring knows who the user is for the rest of the request lifecycle. I always call filterChain.doFilter() at the end — forgetting that would hang the request.
+
+🔹 TOPIC 4 — Building UserDetailsService for Your Library Project
+
+UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+That userDetailsService doesn't magically know how to find your users. We need to teach Spring how to look up users from your Library's database. That's what we build today. 💻
+
+Spring Security doesn't know:
+
+Where your users are stored (DB? File? LDAP? API?)
+What your User entity looks like
+How to convert your User to Spring's UserDetails format
+
+So Spring gives you an interface to fill in:
+public interface UserDetailsService {
+    UserDetails loadUserByUsername(String username) throws UsernameNotFoundException;
+}
+
+JwtAuthenticationFilter
+        │
+        │ calls
+        ▼
+UserDetailsService  ← OUR CUSTOM IMPLEMENTATION
+        │
+        │ calls
+        ▼
+UserRepository  ← Spring Data JPA
+        │
+        │ queries
+        ▼
+PostgreSQL Database
+        │
+        │ returns
+        ▼
+User entity → Convert to UserDetails → Return to Filter
+
+
+There are two User types in your codebase, and the confusion between them trips up many developers:
+Your User entity
+Spring's UserDetails
+
+💡 Why both? Your entity has lots of business fields (books, profile pic, etc.) that Spring Security doesn't care about. UserDetails is the minimum Spring needs to authenticate.
+
+
+💻 The Code — LibraryUserDetailsService
+
+1. User sends: GET /api/books
+   Authorization: Bearer eyJhbGc...
+
+2. JwtAuthenticationFilter intercepts request
+   ↓
+3. Filter extracts JWT, gets "john@lib.com" as subject
+   ↓
+4. Filter calls: userDetailsService.loadUserByUsername("john@lib.com")
+   ↓
+5. OUR service runs:
+   a. SQL: SELECT * FROM users WHERE email = 'john@lib.com'
+   b. Result: User entity { id=42, email="john@lib.com", role="USER", ... }
+   c. Convert to UserDetails (Spring's format)
+   d. Return UserDetails
+   ↓
+6. Filter receives UserDetails
+   ↓
+7. Filter validates JWT against UserDetails
+   ↓
+8. Filter sets SecurityContext ✅
+   ↓
+9. Request reaches controller — knows user is "john@lib.com" with ROLE_USER
+
+┌─────────────────────────────────────────┐
+│   JwtAuthenticationFilter (Day 24)      │  ← Today's filter
+│   "Inspect requests, set auth context"  │
+└─────────────────┬───────────────────────┘
+                  │ uses
+                  ▼
+┌─────────────────────────────────────────┐
+│   LibraryUserDetailsService             │  ← Just built!
+│   "Load user from DB, return UserDetails"│
+└─────────────────┬───────────────────────┘
+                  │ uses
+                  ▼
+┌─────────────────────────────────────────┐
+│   UserRepository (Spring Data JPA)      │  ← From earlier weeks
+│   "Query the database"                  │
+└─────────────────┬───────────────────────┘
+                  │
+                  ▼
+              Database
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

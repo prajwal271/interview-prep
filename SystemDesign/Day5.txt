@@ -1,0 +1,263 @@
+Part 1: Requirements & Scope (Framework Step 1)
+
+What a Notification System Does
+The premise: a central service that other parts of your system (or other teams) use to send notifications to users across different channels. When something happens — an order ships, someone likes your post, a payment succeeds, a promo launches — the notification system delivers a message to the user via push, email, or SMS.
+
+The key mental framing: it's a platform/service that many other services call. Your order service, social service, and marketing team all say "send this notification to this user" — and the notification system handles the messy details of how to actually deliver it. That's the value: centralize the complexity of delivery so every other team doesn't reinvent it.
+
+Functional Requirements (what it DOES)
+
+The clarifying questions and our scope:
+Core (in scope):
+Send notifications across multiple channels — push (mobile push notifications), email, and SMS. (The three classic channels.)
+Support different notification types — transactional (order shipped, OTP, password reset — important, must-deliver) vs promotional (marketing, offers — bulk, lower priority).
+Respect user preferences — users can opt out of channels or types ("no marketing emails," "no SMS"). Legally required in many places (can't spam people who opted out).
+
+Questions to ask about scope:
+4. Who triggers notifications? — other internal services (via API) and possibly scheduled/bulk campaigns. → Both: an API for event-driven sends, plus bulk campaign sends.
+5. Real-time vs scheduled? → Support both — immediate (order shipped → notify now) and scheduled (send this campaign at 9am).
+6. Delivery guarantees? — must every notification be delivered? → Transactional must be reliably delivered (at-least-once); promotional is best-effort. (Different guarantees per type — a key design point.)
+
+Explicitly out of scope (narrowing = senior behavior): building the actual mobile apps, the email/SMS infrastructure itself (we'll use third-party providers like SendGrid/Twilio, not build SMTP servers or telecom links), and in-app notification feeds (the bell icon with a list — that's a different read-heavy system; we're focused on push delivery out to users).
+
+Non-Functional Requirements (the QUALITIES — these drive architecture)
+
+The questions and our answers:
+
+Scale — how many notifications/day? → Let's say billions/day (a large platform). We'll do the math in Part 2, but this is high-volume. Establishes we need serious throughput.
+Read-heavy or write-heavy? → This is a write/throughput-heavy system — it's about processing and sending a massive volume of outbound messages, not serving reads. (Contrast with TinyURL which was read-heavy!) Different profile → different design emphasis. This means our focus is throughput and queues, not caching for reads. Naming this contrast with Day 74 shows you understand systems have different shapes.
+Latency requirements? → Depends on type (an important nuance):
+Transactional (OTP, password reset) → low latency, must be near-instant (you're waiting for that OTP!).
+Promotional (marketing blast) → latency-tolerant — if a marketing email arrives 2 minutes later, nobody cares.
+So we need prioritization — urgent notifications can't get stuck behind a million marketing emails. (This becomes a design feature in Part 6.)
+Availability vs consistency (CAP)? → Availability-priority (AP). The system must always accept and deliver notifications. Slight inconsistency is fine (a notification arriving a bit late, or exact ordering, rarely matters). We must not lose important notifications, but we prioritize staying up and delivering over strict consistency.
+Reliability — the critical one for this system: → We must not lose transactional notifications (guaranteed at-least-once delivery), must handle third-party failures gracefully (email provider down? retry, don't drop), and must avoid spamming (don't send the same notification 5 times due to retries). Reliability and deduplication are the defining challenges of this system — more than raw scale. This is where Day 73's queues + idempotency become central.
+
+It's a centralized platform other services use to deliver notifications across push, email, and SMS, supporting transactional and promotional types while respecting user preferences. I'd scope out the apps and the actual email/SMS infrastructure — we integrate third-party providers. The non-functional drivers: it's throughput-heavy at billions/day — so queues and worker pools, not read-caching — with per-type priority since transactional must be near-instant while promotional is latency-tolerant, and reliability is the defining challenge: guaranteed delivery for transactional, graceful handling of provider failures, and dedup so retries don't spam users
+
+Part 2: Estimation & API Design (Framework Steps 2–3)
+
+Step 2: Estimation
+
+Given (from Part 1): billions of notifications/day. Let's pin numbers: assume 1 billion notifications/day across all channels, for a large platform.
+
+Throughput (notifications/sec) — 1 day ≈ 100,000 seconds (Day 71):
+
+1,000,000,000 ÷ 100,000 = ~10,000 notifications/sec on average.
+
+But — and this is the crucial insight for this system — notifications are extremely spiky, not uniform. Two reasons:
+
+Time-of-day: more notifications during waking hours; a marketing blast might fire at 9am to everyone at once.
+Campaign fan-out: a single "new feature!" campaign to 100M users generates 100 million notifications in a very short burst.
+
+So while the average is 10K/sec, peak could be 10–50× higher — hundreds of thousands/sec during a campaign spike. This spikiness is the headline number (analogous to how "read:write ratio" was TinyURL's headline). It directly justifies the core architecture: "the load is bursty with massive campaign spikes, so I need a queue to absorb bursts and worker pools to drain them at a sustainable rate" — exactly Day 73's load-leveling benefit. Say this: the spikiness is the reason for the queue.
+
+Channel breakdown (rough, to reason about provider load):
+
+Push: the majority (cheapest, most common) — say 80% = 800M/day
+Email: ~15% = 150M/day
+SMS: ~5% = 50M/day (most expensive per message — cost matters, ties to preferences/rate limiting)
+
+Storage — what do we persist?
+
+We don't store notifications forever, but we need them for delivery tracking, retries, and idempotency/dedup (Part 5). Store notification metadata (id, user, channel, status, timestamp) for a retention window (say 30 days for tracking/debugging).
+Per notification metadata ~ a few hundred bytes. 1B/day × ~300 bytes = ~300 GB/day, × 30 days ≈ ~9 TB retained. Significant → sharding again, and older records archived/deleted.
+
+Plus we store user preferences and device tokens (which device to push to) — but that's proportional to users, not notifications, so much smaller.
+
+The key takeaways from the math:
+
+Bursty load with campaign spikes → queues to buffer + worker pools to scale processing (the whole architecture).
+10K/sec average, far higher peaks → the system must scale horizontally on the processing side (add workers).
+Different channels at different volumes/costs → channel abstraction + per-channel handling (SMS is expensive → rate-limit/preference-gate it).
+9 TB tracking data → sharded metadata store with retention.
+
+Not one arbitrary choice — the bursty-throughput profile dictates a queue-and-worker architecture, just as TinyURL's read-heavy profile dictated caching.
+
+Step 3: API Design
+
+The notification system is a platform other services call, so the API is how they request a send. Core endpoint:
+
+1. Send a notification (the main entry point):
+
+POST /api/v1/notifications
+Body: {
+  "userId": "user_123",
+  "type": "ORDER_SHIPPED",          // notification type
+  "channels": ["push", "email"],     // desired channels (optional; can default by type)
+  "priority": "transactional",       // or "promotional"
+  "payload": {                       // the content / template variables
+     "orderId": "ORD-789",
+     "message": "Your order has shipped!"
+  },
+  "idempotencyKey": "evt-abc-123"    // dedup (Day 73!) — critical here
+}
+Response 202: { "notificationId": "notif_xyz", "status": "ACCEPTED" }
+
+Two design points to call out:
+
+Returns 202 Accepted, not 200 OK — this is deliberate and worth stating. 202 means "I've accepted your request and will process it asynchronously" — we don't deliver synchronously (that would be slow and couple the caller to flaky providers). The caller drops the request and moves on; we deliver in the background via queues. This is the async pattern (Day 73) expressed in the API. (Contrast: a synchronous 200 would mean "delivered," which we deliberately avoid.)
+The idempotencyKey is critical here (Day 73) — if the calling service retries (network blip) or sends a duplicate event, the same key lets us dedup and not send the user the notification twice. For a notification system, this isn't optional polish — duplicate notifications spam users, which is a real product failure. We'll use this heavily in Part 5.
+
+2. Supporting endpoints (mention briefly):
+
+GET /api/v1/notifications/{id}          → delivery status (sent/delivered/failed)
+PUT /api/v1/users/{id}/preferences      → update channel/type opt-outs
+POST /api/v1/campaigns                  → bulk/scheduled campaign send (fan-out to many users)
+
+The campaign endpoint is where fan-out originates — "send this to all 100M users matching a segment" — one API call that explodes into millions of notifications. That's the Part 4 challenge, teed up right here.
+
+Interview soundbite: "The core is POST /notifications, returning 202 Accepted because we process asynchronously via queues rather than delivering synchronously — that decouples callers from flaky providers. Each request carries an idempotency key, which is essential here because duplicate sends mean spamming users. A separate campaign endpoint handles bulk sends, which is where fan-out to millions originates. The estimation showed ~10K/sec average but massive campaign spikes, so the whole architecture is queues to absorb bursts plus worker pools to drain them."
+
+Part 3: Multi-Channel Delivery
+
+This part will feel natural — it's essentially good OOP design applied to system architecture, and you do this in Java daily. The challenge: we deliver through three very different channels (push, email, SMS), each with its own provider, format, and quirks. How do we handle them cleanly without a mess of if channel == "push"... else if channel == "email"... scattered everywhere?
+
+The Problem: Channels Are All Different
+
+Each channel is fundamentally different under the hood:
+
+Push notifications → sent via APNs (Apple Push Notification service) for iOS and FCM (Firebase Cloud Messaging) for Android. Requires a device token (which specific phone to reach). Format: a small JSON payload.
+Email → sent via providers like SendGrid, Amazon SES, Mailgun. Requires an email address. Format: subject + HTML body, often from templates. Can be large.
+SMS → sent via Twilio, AWS SNS. Requires a phone number. Format: short plain text (160 chars). Expensive per message (cost matters).
+
+Different destinations (token vs email vs phone), different providers (different APIs, auth, error formats), different content formats, different costs. If we hard-code all this into the core logic, it becomes an unmaintainable tangle — and adding a new channel (say, WhatsApp or Slack) would mean surgery on the core.
+
+The Solution: Channel Abstraction (the adapter/strategy pattern)
+
+This is exactly the design pattern instinct you have from Java. We define a common interface that all channels implement, and the core notification logic talks only to the interface — never to specific channels.
+
+java
+interface NotificationChannel {
+    DeliveryResult send(Notification notification);
+}
+
+class PushChannel implements NotificationChannel {
+    public DeliveryResult send(Notification n) {
+        // talk to APNs/FCM, handle device tokens, push format
+    }
+}
+class EmailChannel implements NotificationChannel {
+    public DeliveryResult send(Notification n) {
+        // talk to SendGrid/SES, render HTML template
+    }
+}
+class SmsChannel implements NotificationChannel {
+    public DeliveryResult send(Notification n) {
+        // talk to Twilio, truncate to 160 chars
+    }
+}
+
+The core service just does:
+
+java
+NotificationChannel channel = channelFactory.get(channelType);
+channel.send(notification);
+
+It doesn't know or care whether it's push, email, or SMS — it calls send() on the interface. This is the Strategy pattern (or Adapter pattern — each channel adapts our internal format to a provider's API). The diagram above shows it: one interface, swappable adapters, each wrapping its provider.
+
+Why this is the right design (the benefits to state):
+
+Extensibility — adding a new channel (WhatsApp, Slack, in-app) means writing one new class implementing the interface. Zero changes to the core logic. This is the Open/Closed Principle (open for extension, closed for modification) — and it directly parallels your plugin architecture in your test platform! You've built exactly this pattern.
+Isolation — each channel's messy provider-specific details (auth, format, error handling) are contained in its own adapter. A bug in the SMS provider integration can't affect email.
+Testability — you can mock the interface to test the core logic without hitting real providers (you'll appreciate this as an SDET — this is exactly how you'd design for testability).
+
+Your bridge: "This is the same plugin/adapter pattern I've built in my test execution platform — a common interface with swappable implementations, so I can add a new channel or test type without touching the core. It's the Strategy pattern, and it satisfies Open/Closed." Saying this connects the design to your real experience — powerful.
+
+Channel Selection & Fallback (the logic on top)
+
+Two pieces of logic sit above the abstraction:
+
+1. Which channels to use? Determined by:
+
+The notification type (an OTP might default to SMS + push; a marketing message to email).
+User preferences (Part 1 — user opted out of SMS → skip SMS). We check preferences before sending (Part 6 covers the preference store).
+What the caller requested (the channels field in the API).
+
+2. Fallback chains (a nice advanced touch to mention): For critical notifications, if the preferred channel fails, fall back to another. Example: OTP via push → if push fails/undelivered → fall back to SMS. This improves delivery reliability for must-deliver messages. "For transactional messages I'd support a fallback chain — try push, fall back to SMS if it fails — to maximize delivery." (Ties to Part 5's reliability theme.)
+
+The Device Token Problem (push-specific detail worth knowing)
+
+One push-specific wrinkle interviewers sometimes probe: to send a push, you need the user's device token (which changes when they reinstall the app, get a new phone, etc.). So the system maintains a device registry — mapping userId → [device tokens] (a user may have multiple devices → send to all). Tokens can go stale; when a provider reports "invalid token," you remove it from the registry. Small but realistic detail that shows depth.
+
+Interview soundbite: "Each channel — push via APNs/FCM, email via SendGrid, SMS via Twilio — has different destinations, formats, and providers. I'd abstract them behind a common channel interface with a separate adapter per channel, so the core logic calls send() without knowing the channel — the Strategy pattern. Adding a channel is then a new adapter with no core changes, satisfying Open/Closed. On top I'd layer channel selection by type and user preference, plus fallback chains for critical notifications — try push, fall back to SMS. It's the same plugin pattern I've used in my test platform.
+
+Part 4: Fan-out & Queue Architecture
+
+The heart of the notification system — and your Kafka turf. This is where one event explodes into millions of deliveries, and where the whole design lives or dies. The architecture above is the complete flow; let's build up why each piece exists.
+
+The Fan-out Problem
+
+"Fan-out" = one input event triggering many output actions. Two flavors here:
+
+Single-event fan-out (small): "order shipped for user_123" → notify that one user across 2–3 channels (push + email). Fan-out of ~2–3. Easy.
+Campaign fan-out (massive — the hard one): "send this new-feature announcement to all 100 million users" → 100 million individual notifications, each needing preference checks, channel routing, and delivery. One API call → 100 million deliveries. This is the scale challenge, and it's bursty (Part 2 — the spike).
+
+The naive approach — a single service loops through 100M users and sends synchronously — fails catastrophically: it'd take forever, one failure stalls everything, it can't parallelize, and a crash loses all progress. We need something fundamentally better.
+
+The Solution: Queue-Based Architecture with Worker Pools
+
+The entire design is built on Day 73's message queue + worker pool pattern. Let's walk the flow (the diagram, top to bottom):
+
+Stage 1: Ingestion (accept fast, decouple)
+A service or campaign calls the Ingestion API → it validates minimally, drops the request onto an ingestion queue (Kafka!), and returns 202 Accepted immediately (Part 2).
+Why: the caller isn't blocked — we've accepted the work and will process it asynchronously. The queue decouples the caller from all the downstream complexity (Day 73's decoupling benefit) and absorbs bursts — a campaign spike fills the queue instead of crashing us (Day 73's load-leveling). This is the shock-absorber.
+
+Stage 2: Processing / Fan-out (the expansion happens here)
+Processor workers pull from the ingestion queue. This is where the heavy lifting happens:
+Expand campaigns: "send to all 100M users" gets expanded into 100M individual notification tasks — the fan-out. (For a campaign, the processor queries the user segment and generates a task per user.)
+Check user preferences (Part 1/6): skip users who opted out of this channel/type. Filter before sending — don't waste provider calls (and cost) on opted-out users.
+Deduplicate (idempotency, Day 73): check the idempotency key — has this notification already been sent/queued? If so, skip. Critical — prevents spamming users on retries.
+Route to the right channel queue: push tasks → push queue, email → email queue, SMS → SMS queu
+
+Stage 3: Per-Channel Queues + Worker Pools (the key design choice)
+Each channel has its own queue and its own pool of workers (the diagram's three columns).
+Channel workers pull from their queue and call the actual provider (via the channel adapter from Part 3): push workers → APNs/FCM, email workers → SendGrid, SMS workers → Twilio.
+
+Why separate queues per channel? (This is the important design decision — state the reasons):
+
+Independent scaling. Push might be 800M/day but email 150M/day (Part 2). Separate pools let you scale each to its own load — many push workers, fewer email workers. One shared queue couldn't do that.
+Failure isolation. If SendGrid (email) goes down, only the email queue backs up — push and SMS keep flowing unaffected. The failure is contained to one channel. With a single queue, a stuck email provider would block push and SMS too. This is huge for reliability — one provider's outage doesn't take down all notifications.
+Different rate limits & speeds. Each provider has its own rate limits (APNs allows X/sec, Twilio allows Y/sec). Separate worker pools let you throttle each channel to its provider's limit independently, without one channel's throttling starving another.
+Different retry/priority policies. SMS (expensive, transactional) might get aggressive retries; promotional email might not. Per-channel queues let you set per-channel behavior.
+
+Say it: "I'd use separate queues and worker pools per channel so I can scale each to its own volume, isolate provider failures — if email's provider is down, push and SMS keep flowing — and respect each provider's rate limits independently." That's a strong, specific design justification.
+
+Why Worker Pools Scale Beautifully (Day 71 + 73 combined)
+
+The workers are stateless (Day 71) — each pulls a task, sends it, done. So:
+
+The queue backs up during a campaign spike? → add more workers to drain it faster (Day 73's "scale processing by adding consumers"). Autoscale worker count based on queue depth.
+A worker crashes mid-task? → the task isn't acknowledged, so it stays in the queue and another worker picks it up (Day 73). No work lost. (This is why queues + at-least-once delivery give resilience — and why workers must be idempotent, Part 5.)
+The spike drains and load drops? → scale workers back down. Elastic.
+
+This is the payoff of the whole architecture: the queue absorbs the burst, and you scale the stateless worker pool to drain it at whatever rate you need. A 100M-user campaign doesn't crash anything — it fills the queues, workers chew through them at a sustainable pace (respecting provider limits), and urgent notifications aren't affected if you use priority (Part 6). Exactly Day 73's load-leveling, at massive scale.
+
+Where Kafka Fits (your expertise)
+
+Kafka is ideal for the queues here (Day 73's deep-dive pays off):
+
+Partitions → parallelism: partition the notification stream so many workers consume in parallel. Partition by userId to keep a user's notifications ordered (Day 73 — key by the entity whose order matters) and to spread load.
+Consumer groups → the worker pool: workers in a group split the partitions (work distribution), and you scale by adding workers up to the partition count (Day 73).
+Durability → Kafka persists messages, so if workers are down, notifications wait safely and get processed when workers recover — no loss (critical for transactional).
+At-least-once delivery → guarantees notifications aren't dropped, at the cost of possible duplicates → which is why dedup/idempotency (Part 5) is essential.
+
+Your bridge: "This is the queue-and-worker-pool pattern I've worked with — Kafka topics partitioned by user for parallelism and ordering, consumer groups as the worker pool, scaled by adding consumers. Durability means notifications survive worker downtime, and at-least-once delivery is why I'd make the send path idempotent."
+
+Interview soundbite (the whole architecture): "Ingestion accepts requests onto a queue and returns 202, decoupling callers and absorbing campaign bursts. Processor workers expand campaigns into per-user tasks, check preferences, dedup on the idempotency key, and route into per-channel queues. Each channel — push, email, SMS — has its own queue and stateless worker pool calling its provider. Separate queues give independent scaling, failure isolation so one provider's outage doesn't block other channels, and per-provider rate limiting. I scale by adding workers based on queue depth, and crashed workers' tasks are retried from the queue. Kafka fits well — partitioned by user for parallelism and ordering, consumer groups as worker pools."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,343 @@
+Spies, the spy trap, BDD Mockito, strictness, static mocking
+
+A mock is 100% hollow (every method returns a default until stubbed). A spy wraps a REAL object — real methods actually run unless you override them. Partial mock.
+
+
+List<String> realList = new ArrayList<>();
+List<String> spyList = spy(realList);     // wrap a genuine ArrayList
+
+spyList.add("apple");                      // REAL add() runs → "apple" genuinely added
+spyList.add("banana");
+System.out.println(spyList.size());        // REAL size() runs → 2
+
+verify(spyList).add("apple");              // can still verify like a mock
+
+Two ways to create one:
+
+// inline:
+List<String> spyList = spy(new ArrayList<>());
+
+// annotation (with MockitoExtension):
+@Spy List<String> spyList = new ArrayList<>();
+
+You learned stubbing as when(mock.method()).thenReturn(value). On a spy, that form is dangerous. Here's why:
+
+List<String> spyList = spy(new ArrayList<>());   // empty real list
+// ❌ DANGEROUS:
+when(spyList.get(0)).thenReturn("apple");
+
+Think about how Java evaluates when(spyList.get(0)). To pass spyList.get(0) into when(...), Java must execute spyList.get(0) first — it has to compute the argument before calling the method. And on a spy, get(0) is a real method call on a real empty list → IndexOutOfBoundsException, thrown immediately, before when can even register the stub.
+
+So with when().thenReturn() on a spy, the real method runs while you're trying to stub it — which can throw, or cause real side effects (real DB write, real charge).
+
+The fix is the do* family, where the method is never actually called during stubbing:
+// ✅ SAFE on a spy:
+doReturn("apple").when(spyList).get(0);
+
+Here .when(spyList) returns a special stubbing proxy, and .get(0) on that proxy is not a real call — Mockito intercepts it purely to record "stub get(0)." The real get(0) is never executed. No exception, no side effect.
+
+when(x.method()).thenReturn(v) → evaluates x.method() for real. Fine for mocks (hollow, harmless). Risky for spies (real method runs).
+doReturn(v).when(x).method() → does NOT evaluate the real method. Safe for both — and mandatory for spies and void methods.
+
+
+Why use doReturn().when() instead of when().thenReturn() on a spy?
+Because when(spy.method()) actually invokes the real method while setting up the stub — on a spy that runs real logic, which can throw or cause side effects. doReturn(v).when(spy).method() registers the stub without ever calling the real method, so it's safe. The same do* form is also required for void methods.
+
+Does this matter for a normal mock?
+Less so — a mock's methods are hollow, so when(mock.method()) just returns a harmless default. But doReturn works on both, so some teams standardise on it. The critical case is spies and void methods.
+
+@ExtendsWith
+The extension is only needed when you use annotations (@Spy, @Mock, @InjectMocks) — without it, those annotations are simply ignored and you get a NullPointerException.
+
+
+BDD-style Mockito — given / willReturn / then / should
+Same Mockito, different vocabulary — designed to read as Given-When-Then (from Part 0). Many teams prefer it because it matches how you describe behaviour.
+
+Classic Mockito			BDD Mockito (BDDMockito)
+when(x).thenReturn(v) 		given(x).willReturn(v)
+
+
+What is BDDMockito and how does it differ from regular Mockito?
+It's the same library with BDD-flavoured aliases — given/willReturn instead of when/thenReturn, and then/should instead of verify — so tests read as Given-When-Then. No behavioural difference; it's a readability/style choice.
+
+Unused stub → UnnecessaryStubbingException  :   (a stub you set up but never called). Catches typos and wrong-path tests.
+Argument mismatch → PotentialStubbingProblem — you stubbed charge("book", 1) but the code called charge("book", 2); strict mode flags the mismatch instead of silently returning a default.
+
+
+Three strictness levels (worth naming in an interview):
+LENIENT		->		No complaints about unused/mismatched stubs.
+WARN 		-> 		Logs warnings (JUnit 4 default-ish).
+STRICT_STUBS	-> 		Fails on unused/mismatched stubs. JUnit 5 MockitoExtension default.
+
+Escape hatch for a single intentional stub:
+
+lenient().when(payment.charge(any(), anyInt())).thenReturn(true);   // exempt THIS stub from strict check
+
+Why is strict stubbing the default and when do you relax it?
+Strict stubbing catches dead stubs and argument mismatches that would otherwise let a test silently exercise the wrong path. I relax it only for a specific intentionally-shared stub using lenient(), never globally, because the strictness is what keeps tests honest.
+
+
+Historically Mockito couldn't mock static methods — a common interview line was "Mockito can't mock statics; use PowerMock." That changed. Since Mockito 3.4 (via mockito-inline), and by default in Mockito 5 (you're on 5.11), Mockito can mock statics natively — no PowerMock needed.
+
+
+try-with-resources
+Purpose is to auto close a resource , it does not need a catch and finally block 
+But it requires auto closable object 
+
+try (MockedStatic<IdGenerator> mocked = mockStatic(IdGenerator.class)) {
+    // static mock is ACTIVE here
+    mocked.when(IdGenerator::newId).thenReturn("FIXED-123");
+    assertEquals("FIXED-123", IdGenerator.newId());
+    mocked.verify(IdGenerator::newId);
+} // ← mocked.close() is AUTO-CALLED here by JVM
+
+
+Can Mockito mock static methods?
+Yes — since Mockito 3.4 with the inline mock maker, and by default in Mockito 5, using mockStatic(...). It returns a MockedStatic scoped in a try-with-resources block, active only on the current thread, so the static mock can't leak into other tests. Before that you needed PowerMock
+
+Why must mockStatic be in a try-with-resources?
+Because the static mock is active until closed. Without scoping it, the mocked behaviour would leak into subsequent tests on the same thread and cause flaky, order-dependent failures. The try-with-resources closes and deregisters it automatically.
+
+What shouldn't you mock, and why?
+The class under test — mocking it means testing the mock, not real logic. Value objects/DTOs — just build real instances. And ideally not third-party types directly — I wrap them in my own interface and mock that, so my tests don't depend on someone else's API shape. Mock the boundaries — repositories, gateways, external services — not data or the unit itself.
+
+Can Mockito mock final classes and private methods?
+Final classes and final methods — yes, with the inline mock maker, which is the default in Mockito 5. Private methods — no; Mockito can't intercept them. I test private logic indirectly through the public method that uses it, or extract it into a collaborator I can mock
+
+Final Part
+
+public class OrderService {
+    private final PaymentGateway payment;
+    private final InventoryRepository inventory;
+    private final EmailService email;
+
+    public OrderService(PaymentGateway payment, InventoryRepository inventory, EmailService email) {
+        this.payment = payment;
+        this.inventory = inventory;
+        this.email = email;
+    }
+
+    public String placeOrder(String item, int qty, String customerEmail) {
+        if (qty <= 0) throw new IllegalArgumentException("qty must be positive");   // branch A
+        if (!inventory.isAvailable(item, qty)) return "OUT_OF_STOCK";               // branch B
+        boolean paid = payment.charge(item, qty);
+        if (!paid) return "PAYMENT_FAILED";                                         // branch C
+        inventory.reduce(item, qty);
+        email.sendEmail(customerEmail);                                             // void side effect
+        return "CONFIRMED";                                                         // branch D
+    }
+}
+
+
+
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.*;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+@ExtendWith(MockitoExtension.class)                 // Part 7: turn annotations on
+class OrderServiceTest {
+
+    @Mock PaymentGateway payment;                   // Part 7: mock collaborators
+    @Mock InventoryRepository inventory;
+    @Mock EmailService email;
+    @InjectMocks OrderService service;              // Part 7: real object under test
+
+    // ---- Branch A: validation ----
+    @Test
+    @DisplayName("non-positive quantity is rejected before any dependency is touched")
+    void placeOrder_zeroQty_throws() {
+        IllegalArgumentException ex = assertThrows(   // Part 3: exception + message
+                IllegalArgumentException.class,
+                () -> service.placeOrder("book", 0, "a@mail.com"));
+        assertEquals("qty must be positive", ex.getMessage());
+
+        verifyNoInteractions(payment, inventory, email);   // Part 8: proved we bailed out early
+    }
+
+    // ---- Branch B: out of stock ----
+    @Test
+    @DisplayName("out of stock -> no charge, no email")
+    void placeOrder_outOfStock() {
+        when(inventory.isAvailable("book", 3)).thenReturn(false);   // Part 7: stub
+
+        String result = service.placeOrder("book", 3, "a@mail.com");
+
+        assertEquals("OUT_OF_STOCK", result);
+        verify(payment, never()).charge(any(), anyInt());          // Part 8: prove a negative
+        verify(email, never()).sendEmail(any());
+    }
+
+    // ---- Branch C: payment fails ----
+    @Test
+    @DisplayName("payment fails -> inventory not reduced, no email")
+    void placeOrder_paymentFails() {
+        when(inventory.isAvailable("book", 1)).thenReturn(true);
+        when(payment.charge("book", 1)).thenReturn(false);         // force the failure branch
+
+        String result = service.placeOrder("book", 1, "a@mail.com");
+
+        assertEquals("PAYMENT_FAILED", result);
+        verify(inventory, never()).reduce(any(), anyInt());
+        verify(email, never()).sendEmail(any());
+    }
+
+    // ---- Branch D: happy path ----
+    @Test
+    @DisplayName("in stock + paid -> charge, reduce stock, email sent, CONFIRMED, in order")
+    void placeOrder_success() {
+        when(inventory.isAvailable("book", 2)).thenReturn(true);
+        when(payment.charge("book", 2)).thenReturn(true);
+
+        String result = service.placeOrder("book", 2, "a@mail.com");
+
+        assertEquals("CONFIRMED", result);
+
+        InOrder order = inOrder(inventory, payment, email);        // Part 8: sequence matters
+        order.verify(inventory).isAvailable("book", 2);
+        order.verify(payment).charge("book", 2);
+        order.verify(inventory).reduce("book", 2);
+        order.verify(email).sendEmail("a@mail.com");
+    }
+
+    // ---- Error propagation ----
+    @Test
+    @DisplayName("gateway throws -> exception propagates, stock untouched")
+    void placeOrder_gatewayThrows() {
+        when(inventory.isAvailable("book", 1)).thenReturn(true);
+        when(payment.charge("book", 1)).thenThrow(new RuntimeException("gateway down")); // Part 7
+
+        assertThrows(RuntimeException.class,
+                () -> service.placeOrder("book", 1, "a@mail.com"));
+
+        verify(inventory, never()).reduce(any(), anyInt());        // didn't reduce after a crash
+    }
+}
+
+
+
+
+Each test drives one branch and asserts both the return value and the interactions (what was/wasn't called).
+The negatives (never(), verifyNoInteractions) are as important as the positives — they prove your code doesn't charge a card when it shouldn't
+Every stub is actually used (no UnnecessaryStubbingException )
+@DisplayName makes the report read like a behaviour spec
+
+
+One behaviour per test. Not necessarily one assertion, but one logical thing. A test name should describe a single scenario.
+Test behaviour, not implementation. Assert what the method achieves, not how. Tests that mirror internal steps break on every refactor.
+Cover edge cases: null, empty, zero, negative, boundary, max, and every branch.
+Keep tests independent and fast (FIRST from Part 0). Fresh state via @BeforeEach.
+Mock the boundaries — repositories, gateways, external services. Not value objects, not the unit itself.
+Make tests deterministic. No real now()/random — inject a Clock, seed randomness.
+
+
+Don't test getters/setters or framework code with no logic.
+Don't over-mock — if everything's mocked, you've tested nothing real.
+Don't write order-dependent tests or share mutable state across them.
+Don't assert on log messages or private internals.
+Don't chase a coverage number with assertion-free tests (next point).
+
+
+What makes a good unit test?
+It's fast, isolated, repeatable, self-validating (FIRST); tests one behaviour with a descriptive name; asserts observable behaviour rather than implementation so it survives refactors; and covers the meaningful edge cases and branches. It mocks external boundaries, not value objects or the unit itself.
+
+
+
+---------------------------- Q & A -------------------------------------------------
+Three parts of JUnit 5? Platform (launcher/engine API), Jupiter (new test API + engine), Vintage (runs JUnit 3/4).
+JUnit 4 vs 5? Package org.junit → org.junit.jupiter.api; @Before→@BeforeEach, @BeforeClass→@BeforeAll; @RunWith→@ExtendWith; public no longer required; needs Java 8+.
+A test passes when…? It doesn't throw. Assertions fail by throwing AssertionError.
+assertEquals arg order? (expected, actual).
+Test an exception? assertThrows(Type.class, () -> code()) — returns the exception so you can assert the message.
+Why a lambda in assertThrows? Defers execution so assertThrows runs it in its own try/catch.
+assertEquals on objects uses? .equals() — override it or the test fails on identical-looking objects.
+Why a delta for doubles? Floating-point can't store decimals like 0.1 exactly; compare within tolerance.
+@BeforeEach vs @BeforeAll? Per-test fresh setup vs once-per-class expensive setup.
+Why are @BeforeAll/@AfterAll static? Default PER_METHOD lifecycle = new instance per test, so no instance to own them. @TestInstance(PER_CLASS) lets them be non-static.
+Assertion vs assumption? Assertion fails the test; assumption (assumeTrue) skips/aborts it.
+Parameterized sources? @ValueSource (one arg), @CsvSource (multiple literals), @MethodSource (objects/computed), @EnumSource, @NullAndEmptySource.
+@RepeatedTest vs @ParameterizedTest? Same logic repeated vs varying input each run.
+Why @Nested non-static? Only a non-static inner class is bound to the outer instance, so it can use the outer fields/setup.
+
+Mockito:
+
+15. Why mock? Isolate the unit; real deps are slow/unreliable/side-effecting/unforceable.
+
+16. 5 test doubles? Dummy, Stub, Mock, Spy, Fake.
+
+17. Stub vs Mock? Stub returns canned values (state verification); mock also records calls (behaviour verification).
+
+18. Mock vs Spy? Mock is fully fake; spy wraps a real object (partial mock — real methods run unless stubbed).
+
+19. Fake? A real but simplified working implementation (e.g. in-memory repo).
+
+20. Un-stubbed mock returns? Defaults — null/0/false/empty collection.
+
+21. @ExtendWith(MockitoExtension.class)? Activates @Mock/@InjectMocks; without it, mock fields are null.
+
+22. @Mock vs @InjectMocks? Mock = fake collaborator; @InjectMocks = real object under test with mocks injected.
+
+23. @InjectMocks injection order? Constructor → setter → field.
+
+24. Consecutive returns? thenReturn(a, b, c) — last value repeats.
+
+25. thenReturn vs thenAnswer? Fixed value vs value computed from actual args.
+
+26. Stub a void method? doNothing()/doThrow().when(mock).method() — when() can't take a void call.
+
+27. verify vs assertion? Checks interactions (was it called, how) vs checks return/state.
+
+28. never() use? Prove a call did NOT happen (only verification can prove a negative).
+
+29. Matcher mixing rule? All matchers or all raw — wrap literals in eq(). Else InvalidUseOfMatchersException (matchers register on an internal stack as a side effect).
+
+30. ArgumentCaptor? Capture the actual argument passed to a mock to assert on its contents.
+
+31. Spy stubbing form? doReturn(v).when(spy).method() — when(spy.method()) runs the real method during stubbing.
+
+32. UnnecessaryStubbingException? Strict mode flags an unused stub; remove it or use lenient().
+
+33. Mock a static? mockStatic(...) in try-with-resources (default in Mockito 5, no PowerMock).
+
+34. Mock final classes? Yes — inline mock maker, default in Mockito 5. Private methods — no.
+
+35. What not to mock? The class under test, value objects/DTOs, ideally not third-party types directly.
+
+36. @Mock vs @MockBean? Plain Mockito (no context) vs mock inside Spring context.
+10.6 Practice exercises — DO these (reading ≠ learning)
+Build and fully test each (you already have most of the classes):
+
+StringUtils.reverse(String) — normal, empty, single char, null (decide behaviour, then test it). Make it parameterized with @CsvSource.
+Calculator.divide — normal, divide-by-zero throws (assertThrows + message), negatives. Parameterized.
+BankAccount — deposit increases, withdraw decreases, overdraft throws, negative deposit throws. Use @BeforeEach + @Nested (deposits / withdrawals).
+NotificationService depending on a mocked EmailService + mocked UserRepository — when user exists, email goes to the right address (use ArgumentCaptor); when user not found, sender is never called (verify(..., never())).
+OrderService — reproduce all five branch tests above from memory, then add: order succeeds for qty exactly equal to available stock (boundary).
+Spy exercise — spy a real ArrayList, let add run real, stub size() with doReturn, and prove you understand why when(spy.get(0)) would throw.
+
+When you finish any of them, paste it and say "review this like a senior engineer" — I'll critique naming, branch coverage, over-mocking, and interview-readiness.
+10.7 Today's final checklist (Day 45)
+
+ Explain unit test, the unit, isolation, test pyramid, AAA, FIRST — aloud.
+ Explain the 3 parts of JUnit 5 and 4-vs-5 differences.
+ Use @Test, all assertions, assertThrows, lifecycle hooks, parameterized tests.
+ Explain PER_METHOD vs PER_CLASS and why @BeforeAll is static.
+ Wire @ExtendWith + @Mock + @InjectMocks; explain injection order.
+ Stub (thenReturn/thenThrow/thenAnswer/do*), verify (times/never/InOrder), matchers (+ mixing rule), ArgumentCaptor.
+ Explain mock vs spy, the spy doReturn trap, UnnecessaryStubbingException, mockStatic.
+ Distinguish the 5 test doubles and what not to mock.
+ Write the full OrderService test from scratch.
+
+
+
+
+
+
+
+
+
+
+
+

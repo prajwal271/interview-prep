@@ -1,0 +1,152 @@
+SecurityFilterChain: Public vs Protected Routes
+
+BCryptPasswordEncoder: Why You Can Never Recover a Password
+
+user.setPassword("mypassword123");  // stored as plain text in DB
+// If DB is hacked → attacker gets ALL user passwords
+// Those same passwords work on Gmail, Instagram, banking apps
+// → millions of accounts compromised
+
+BCrypt — One-Way Hashing
+
+// Add this Bean to SecurityConfig:
+@Bean
+public PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();
+}
+
+// When user registers:
+String rawPassword = "mypassword123";
+String hashed = passwordEncoder.encode(rawPassword);
+// hashed = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+// Store THIS in DB — never the original
+
+// When user logs in:
+passwordEncoder.matches("mypassword123", storedHash); // → true
+passwordEncoder.matches("wrongpassword", storedHash); // → false
+
+
+Why BCrypt is Special
+1. One-way — you cannot reverse it. That's why "Forgot Password" sends a reset link, not your actual password.
+2. Salted — even if two users have the same password, their hashes are different: This prevents "rainbow table" attacks.
+3. Slow by design — BCrypt deliberately takes ~100ms to compute. For a real user logging in, 100ms is fine. For an attacker trying 1 billion passwords — it becomes years.
+
+// REGISTER — hash before saving:
+@PostMapping("/register")
+public ResponseEntity<UserResponse> register(@RequestBody @Valid RegisterRequest req) {
+    User user = new User();
+    user.setEmail(req.getEmail());
+    user.setPassword(encoder.encode(req.getPassword())); // ← BCrypt here
+    user.setRole("USER");
+    return ResponseEntity.status(201).body(userMapper.toResponse(userRepo.save(user)));
+}
+
+// LOGIN — Spring compares hashes internally:
+@PostMapping("/login")
+public ResponseEntity<AuthResponse> login(@RequestBody LoginRequest req) {
+    // authManager calls BCrypt.matches() internally
+    authManager.authenticate(
+        new UsernamePasswordAuthenticationToken(req.getEmail(), req.getPassword())
+    );
+    // If wrong password → throws BadCredentialsException → 401
+    // If correct → continues
+    String token = jwtUtil.generateToken(userDetailsService.loadUserByUsername(req.getEmail()));
+    return ResponseEntity.ok(new AuthResponse(token, "Bearer", 86400));
+}
+
+
+Roles + @PreAuthorize + @EnableMethodSecurity
+
+You already saw route-level security in Topic 1 (hasRole("ADMIN") in SecurityFilterChain). But sometimes you need method-level security — locking down specific methods inside a service or controller.
+
+// Enable method-level security — add to SecurityConfig:
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity   // ← this unlocks @PreAuthorize
+public class SecurityConfig { ... }
+
+@PreAuthorize — Lock Individual Methods
+
+// Only ADMIN can create a book
+    @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<BookResponse> create(@RequestBody @Valid BookRequest req) {
+        return ResponseEntity.status(201).body(bookService.create(req));
+    }
+
+
+User Can Only Access Their OWN Data
+
+// A user should only see their OWN borrow history — not someone else's
+@GetMapping("/my-history")
+public ResponseEntity<List<BorrowResponse>> myHistory() {
+    // Get logged-in user's email from SecurityContext
+    String email = SecurityContextHolder.getContext()
+                        .getAuthentication().getName();
+    return ResponseEntity.ok(borrowService.getHistoryByEmail(email));
+}
+
+// NEVER trust userId from the URL:
+// GET /api/borrow/history?userId=5   ← user could type any ID!
+// Always take userId from the JWT token (SecurityContext)
+
+User registers → role = "USER" stored in DB
+                       ↓
+User logs in → JWT generated → contains role inside payload
+                       ↓
+Request arrives → JwtFilter reads token → sets Authentication with roles
+                       ↓
+@PreAuthorize checks → ROLE_ADMIN? → allow/deny
+
+
+What Happens When Roles Don't Match
+
+No token at all	---> 401 Unauthorized — not authenticated
+Has token, wrong role	--->  403 Forbidden — authenticated but not allowed
+
+
+If your rules are simple and URL-based, FilterChain alone works perfectly:
+.authorizeHttpRequests(auth -> auth
+    .requestMatchers("/api/admin/**").hasRole("ADMIN")
+    .requestMatchers("/api/books/**").authenticated()
+    .anyRequest().permitAll()
+)
+
+
+When FilterChain is NOT ENOUGH
+The problem is FilterChain only sees the URL. It cannot see who owns the data.
+
+// FilterChain allows this — both are GET /api/borrow/{id}
+GET /api/borrow/5   ← Alice's borrow record
+GET /api/borrow/5   ← Bob trying to read Alice's record
+
+FilterChain sees the same URL for both — it cannot tell the difference. So you need:
+
+@GetMapping("/{id}")
+@PreAuthorize("#borrowId == authentication.principal.id")
+public ResponseEntity<BorrowResponse> getById(@PathVariable Long borrowId) {
+    ...
+}
+
+FilterChain hasRole() ---> URL pattern + role
+@PreAuthorize ---> Method logic + role + ownership
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

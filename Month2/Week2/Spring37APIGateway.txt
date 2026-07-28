@@ -1,0 +1,330 @@
+User has to know 4 different URLs (8081, 8082, 8083, 8084)
+Adding authentication = adding JWT validation to every service
+CORS configuration repeated in every service
+Request logging is scattered across services
+Changing the public URL of a service requires changing client code
+Want to do A/B testing? Need to add logic to every service
+
+Every one of these is solved by putting ONE component in front of all your services. That component is the API Gateway.
+
+What an API Gateway actually does — the canonical list
+1. Routing
+Map external URLs to internal services. /api/users/** goes to user-service. /api/books/** goes to book-service. The user doesn't know or care that these are different services on different ports.
+2. Load Balancing
+When user-service has 4 instances, the gateway picks one per request (round-robin, weighted, least-connections, whatever). External clients don't deal with this complexity.
+3. Authentication and Authorization
+Validate JWT tokens once at the edge. If valid, the request continues to the backend with the user identity attached. If invalid, the gateway rejects the request — the backend services never even see it.
+This is huge: instead of every service having JWT code, only the gateway does. Services trust that anything that reached them was already authenticated.
+4. Rate Limiting
+"Allow no more than 100 requests/second per user." The gateway tracks request rates and rejects excess traffic with 429 Too Many Requests. Backends are protected from abuse.
+5. Request/Response Transformation
+Strip headers, add headers, rewrite paths, modify response bodies. Useful for legacy API compatibility — the gateway can present a clean API to clients while talking to messy backends.
+6. SSL/TLS Termination
+Handle HTTPS at the gateway. Decrypt the request, forward as plain HTTP internally (within your trusted network). Means certificates are managed in one place, and backend services don't need SSL config.
+7. Cross-cutting Logging and Metrics
+Every request flows through the gateway, so it's the perfect place to log "user X hit endpoint Y at time Z, returned 200 in 45ms." Centralized observability.
+8. CORS Handling
+Configure CORS at the gateway. Backends don't need to know about CORS at all.
+9. Circuit Breaking at the Edge
+If user-service goes completely down, the gateway can immediately return a friendly 503 to clients, or serve cached responses. Faster than waiting for backend timeouts.
+10. API Versioning
+Route /v1/users/** to user-service-v1, /v2/users/** to user-service-v2. Same gateway, different backend versions, transparent to clients during migrations.
+
+Why this is called "cross-cutting concerns"
+Auth, logging, rate limiting, CORS — these are needed by EVERY service. If you put them in each service, you have N copies of essentially identical code. Change the JWT validation rule? Update N services. Add a new logging field? Update N services. This is the shotgun surgery anti-pattern.
+If you put them at the gateway, you have ONE copy. Change once, applies everywhere. This is the single biggest argument for an API Gateway.
+The technical term: cross-cutting concerns. They "cut across" multiple modules. The Gateway gives them a single home.
+
+Spring Cloud Gateway
+	Microservices API Gateway
+	YAML or Java DSL
+	Native Eureka / Consul / K8s integration
+	Routes update at runtime as services register/deregister
+	Plain Java code
+	First-class with Spring Security integration
+	
+Honest answer: nginx is faster at raw throughput. Spring Cloud Gateway is better integrated with Spring microservices. In a real production system you often see both — nginx (or AWS ALB, or Cloudflare) at the very edge for SSL termination and DDOS protection, then Spring Cloud Gateway behind it for smart routing and microservices integration.
+For an interview: "Spring Cloud Gateway is the right choice when you have a Spring microservices ecosystem with Eureka, because it natively integrates with the service registry and Spring Security. For a pure CDN/edge layer, I'd use nginx or a cloud-managed load balancer. They complement each other in larger deployments."
+
+API Gateway?
+Single entry point that handles cross-cutting concerns (routing, auth, rate limit, logging) for a microservices system.
+What's a "cross-cutting concern" and why does the Gateway exist?
+A concern needed by every service (auth, logging, etc). Putting it in each service = N copies. Putting it in the gateway = 1 copy. The Gateway is the canonical place for cross-cutting concerns at the HTTP layer.
+Why is Spring Cloud Gateway reactive while your services aren't?
+Gateways are I/O bound (mostly waiting on backends). Reactive scales far better for high-concurrency I/O-bound workloads. Your services do real CPU work and benefit less from reactive — Servlet is fine for them
+What are the two halves of a Spring Cloud Gateway route?
+Predicates (does this request match?) and Filters (transform request and response). Together they fully define the routing behavior.
+Why use Spring Cloud Gateway instead of nginx?
+Spring Cloud Gateway integrates natively with the Spring/Eureka ecosystem and dynamically picks up new services as they register. nginx is faster but requires manual config and external service discovery integration. In production you often use both — a generic edge (nginx/ALB) and a smart gateway (Spring Cloud Gateway) behind it.
+
+
+
+Spring Cloud Gateway's architecture
+A route in Spring Cloud Gateway has three parts:
+1. ID : A unique name for the route. Just an identifier.
+2. Predicate : A boolean condition that decides "does this incoming request match this route?"
+	If the predicate evaluates to true, the request enters this route. If false, the gateway tries the next route. If no route matches, returns 404.
+Step 1 — How does the Gateway recognize "this is a user-service request"?
+That if condition — request.getPath().startsWith("/api/users/") — is a predicate.
+A predicate is just a fancy word for "a yes/no question about the request." Returns true or false.
+In Spring Cloud Gateway YAML, you write that if condition like this:
+predicates:
+  - Path=/api/users/**
+That's the same if statement, written as YAML. Gateway evaluates it for every incoming request: "Does the path match /api/users/**? Yes or no?"
+Yes → enter this route, process further
+No → try the next route in the list. If no route matches, return 404 Not Found.
+Step 2 — Why "predicate" instead of just "matcher"?
+Honest answer: it's just Java terminology. Java has a class called java.util.function.Predicate<T> — it's a function that takes a thing and returns true or false. Gateway uses that exact type internally. So they kept the name "predicate" in the documentation.
+In your head, just translate "predicate" = "matching rule" every time you see it.
+
+predicates:
+  - Path=/api/users/**
+  - Method=GET
+  - Header=X-Region, asia
+
+Step 4 — Now what about filters?
+Predicates decide IF a request matches. Filters decide what HAPPENS to the request once it matched.
+Going back to our example, we said:
+
+Remove the /api prefix before forwarding → that's a filter (it modifies the request)
+Add a logging header → that's a filter
+
+In YAML, 
+routes:
+  - id: user-service-route                    # ID
+    uri: lb://user-service                    # where to forward
+    predicates:
+      - Path=/api/users/**                    # the "if" condition
+    filters:
+      - StripPrefix=1                         # filter 1: strip "/api"
+      - AddRequestHeader=X-Request-ID, ${random.uuid}  # filter 2
+      - AddResponseHeader=X-Powered-By, Spring Cloud Gateway  # filter 3
+
+3. Filters : Functions that transform the request before it goes to the backend AND transform the response on the way back.
+
+The full picture of how Gateway processes ONE request
+
+1. Request arrives: GET /api/users/1
+
+2. Gateway loops through its list of routes:
+   - Route "user-service-route": predicate is `Path=/api/users/**`
+   - Does /api/users/1 match? YES.
+   - This route wins. Stop looking.
+
+3. Apply pre-filters (transform request before forwarding):
+   - StripPrefix=1 → request becomes GET /users/1
+   - AddRequestHeader=X-Request-ID, abc-123 → adds header
+
+4. Forward to backend:
+   - uri is "lb://user-service" — load-balanced via Eureka
+   - Gateway picks an instance, say 172.18.0.5:8081
+   - Sends: GET http://172.18.0.5:8081/users/1
+                with header X-Request-ID: abc-123
+
+5. Backend (user-service) processes the request, returns:
+   - 200 OK
+   - body: {"id":1, "name":"Prajwal"}
+
+6. Apply post-filters (transform response before returning to client):
+   - AddResponseHeader=X-Powered-By, Spring Cloud Gateway → adds header
+
+7. Return to client:
+   - 200 OK
+   - body: {"id":1, "name":"Prajwal"}
+   - headers include X-Powered-By: Spring Cloud Gateway
+
+
+A complete real route, line by line
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: user-service-route
+          uri: lb://user-service
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - StripPrefix=1
+
+
+ A multi-service example to lock it in
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: user-service-route
+          uri: lb://user-service
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - StripPrefix=1
+
+        - id: book-service-route
+          uri: lb://book-service
+          predicates:
+            - Path=/api/books/**
+          filters:
+            - StripPrefix=1
+
+        - id: borrow-service-route
+          uri: lb://borrow-service
+          predicates:
+            - Path=/api/borrows/**
+          filters:
+            - StripPrefix=1
+
+
+Three building blocks run the whole thing: Route → Predicate → Filter
+a gateway is just a list of Routes
+
+A single Route is made of four things:
+
+id — a name for the route (just a label, e.g. book-service-route).
+uri — where to forward the request (e.g. http://localhost:8082).
+predicates — the conditions under which this route matches ("only if the path starts with /api/books").
+filters — modifications to apply to the request on the way in and the response on the way out.
+
+The most common one is the Path predicate: Path=/api/books/** → matches any request whose path starts with /api/books. But there are many built-in predicates — you can match on:
+
+Filter — the "do something to it" step
+A filter lets you modify the request before it goes to the service, and/or the response before it goes back to the client. Filters run in two phases:
+
+Pre-filters — run before the request is forwarded downstream. Use: add a header, validate a JWT, log the incoming request, check rate limits.
+Post-filters — run after the downstream service responds, on the way back. Use: add a response header, log the status code, measure how long the call took.
+
+There are two scopes:
+
+Gateway filters — attached to one specific route.
+Global filters — applied to every route automatically (perfect for auth and logging — exactly the cross-cutting concerns from Part 1).
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: book-service-route        # 1
+          uri: http://localhost:8082    # 2
+          predicates:
+            - Path=/api/books/**        # 3
+          filters:
+            - AddRequestHeader=X-Source, gateway   # 4
+
+Why it's built on reactive Netty / WebFlux (the part that trips people)
+
+Everything you've built so far runs on Tomcat, the default servlet container, using a thread-per-request model:
+
+A request arrives → Tomcat assigns it one thread from a pool.
+That thread stays stuck on the request until it's fully done — including any waiting (DB query, network call).
+
+For normal CRUD services this is fine — they do real CPU work and quick DB hits. But think about what a gateway does: it receives a request and... waits for a downstream service to respond, then passes the response back. It's almost pure I/O waiting — barely any CPU work of its own. Under the thread-per-request model, a gateway proxying 5,000 concurrent slow requests would need ~5,000 threads sitting idle, each just waiting. Threads are expensive (memory + context-switching), so this collapses fast.
+
+So Spring Cloud Gateway is built on Spring WebFlux + Netty, which use a non-blocking, event-loop model instead:
+A small number of threads (the event loop) handle thousands of connections.
+When a request is waiting on the downstream service, its thread does not block — it's freed to handle other requests. When the downstream response arrives, the work resumes via a callback.
+Result: a handful of threads serve enormous concurrency, because nobody sits idle holding a thread while waiting.
+
+Analogy: Tomcat's model is a restaurant where each waiter is assigned to one table and stands there while the guests slowly read the menu, do nothing else, ever. You need as many waiters as tables. Netty's event-loop model is one sharp waiter who takes table 1's order, and while the kitchen cooks it, takes table 2's, then 3's, looping back whenever anything is ready. One waiter, many tables, nobody standing idle. A gateway is all "waiting on the kitchen" (downstream services), so the event-loop waiter is exactly right
+
+Spring Cloud Gateway models everything as Routes. Each route has a URI destination, Predicates that decide whether the route matches a request, and Filters that modify the request and response in pre/post phases — global filters cover cross-cutting concerns like auth and logging across all routes. It's built on Spring WebFlux and Netty rather than the servlet/Tomcat stack, because a gateway is almost pure I/O — it mostly waits on downstream services — and the non-blocking event-loop model handles high concurrency with very few threads, whereas thread-per-request would need a thread sitting idle per in-flight request. The trade-off is you must stay non-blocking inside the gateway — no blocking JPA or synchronous calls on the event-loop threads.
+
+I add Spring Cloud Gateway as its own module with spring-cloud-starter-gateway — and deliberately not the web starter, because the gateway runs on the reactive Netty stack, not servlet Tomcat. Routes are declared in application.yml: each has an id, a destination URI, and a Path predicate. The gateway forwards the matched path to the target service, so clients hit one port — 8085 — instead of every service's port. A 404 means no route matched; a 503 means the route matched but the downstream service was unreachable.
+
+
+Dynamic Routing with Eureka (lb://)
+Part 3 worked, but every URI was a hardcoded http://localhost:8081. That's brittle: the moment a service changes port, moves to another host, or you run two copies for load, the gateway is clueless. Part 4 removes the hardcoding entirely. This is where Day 36's Eureka finally earns its keep.
+
+You stood up a Eureka server on 8761, and each service registers itself there on startup using its spring.application.name. Eureka holds a live registry — a map of:
+USER-SERVICE   → [ localhost:8081 ]
+BOOK-SERVICE   → [ localhost:8082 ]
+BORROW-SERVICE → [ localhost:8083 ]
+
+(Eureka stores names in uppercase.) If you ran a second copy of book-service on 8092, the registry would show BOOK-SERVICE → [ localhost:8082, localhost:8092 ]. Eureka is the phone book: name in, current address(es) out.
+
+Right now your gateway memorizes the phone number (http://localhost:8082). What we want: the gateway looks the service up in the phone book by name every time. That's exactly what the lb:// URI scheme does.
+
+lb = load balancer. When a route's URI is lb://BOOK-SERVICE, the gateway interprets it as:
+"Don't connect to a fixed address. Ask the discovery client for all instances registered under the name BOOK-SERVICE, pick one, and forward there."
+
+Two things change to make this work: (1) the gateway must itself become a Eureka client so it can read the registry, and (2) the route URIs change from http://... to lb://....
+
+How it works internally (the new request flow)
+
+Request: GET localhost:8085/api/books/5
+      │
+      ▼
+  [ Predicate match ]  → route "book-service", uri = lb://BOOK-SERVICE
+      │
+      ▼
+  [ ReactiveLoadBalancerClientFilter ]   ← sees the "lb://" scheme
+      │      │
+      │      ├─► asks Spring Cloud LoadBalancer for "BOOK-SERVICE"
+      │      │        └─► reads the Eureka registry (locally cached)
+      │      │              → instances: [localhost:8082, localhost:8092]
+      │      └─► picks one (round-robin) → localhost:8092
+      │
+      ▼
+  URI rewritten to  http://localhost:8092/api/books/5  → forwarded
+
+
+The key internal player is the ReactiveLoadBalancerClientFilter. It's a built-in global filter that activates whenever a route's URI starts with lb://. It hands the service name to LoadBalancer, gets back a concrete instance, rewrites the URI to that instance's real host:port, and lets the request continue. Default selection is round-robin across healthy instances.
+
+Important nuance: the gateway doesn't hammer Eureka on every request. Each client keeps a local cache of the registry, refreshed on an interval (~30s by default). So lookups are fast (in-memory), and there's a small lag before a newly-started instance appears.
+
+Hardcoding service URLs in the gateway doesn't scale — services move and you can't load balance. So I register the gateway as a Eureka client and change route URIs from http://host:port to lb://SERVICE-NAME. The ReactiveLoadBalancerClientFilter intercepts the lb:// scheme, asks Spring Cloud LoadBalancer to resolve that name against the Eureka registry, picks a healthy instance round-robin, and rewrites the URI to its real address. Adding a second instance means the gateway load-balances across it automatically, with no config change. Eureka data is cached locally and refreshed periodically, so lookups stay fast.
+
+A filter can modify the request on the way in (pre) and the response on the way out (post). Two scopes:
+
+Gateway filter → attached to one route.
+Global filter → applied to every route automatically.
+
+Cross-cutting concerns like auth and logging belong at the gateway, not duplicated in every service. I implement them as GlobalFilter beans — Spring auto-registers any GlobalFilter into the chain. In the filter, logic before chain.filter(exchange) is the pre phase and logic in .then(...) is the post phase. For auth I read the Authorization header, validate the JWT, and if it's bad I set 401 and call setComplete() to short-circuit so the request never reaches a downstream service. getOrder() controls sequencing — I run logging before auth so even rejected requests are logged. Everything stays non-blocking because it's the reactive stack.
+
+Q: What is an API Gateway and why use one?
+A single entry point in front of all microservices. It gives clients one stable address, routes each request to the right service, and centralizes cross-cutting concerns — auth, logging, CORS, rate limiting — so they aren't duplicated in every service. It handles north-south traffic (outside world → system).
+
+Q: Gateway vs Load Balancer — aren't they the same?
+No, and this one matters. A load balancer distributes traffic across multiple instances of the same service (3 copies of book-service). An API Gateway routes across different services (books vs users vs borrows) and adds cross-cutting logic. They're complementary, not alternatives — in fact Spring Cloud Gateway uses a load balancer internally: that's exactly what lb://BOOK-SERVICE triggers. Gateway decides which service; the load balancer decides which instance of it.
+
+Q: Why is Spring Cloud Gateway built on Netty/WebFlux instead of Tomcat?
+A gateway is almost pure I/O — it mostly waits on downstream services. Tomcat's thread-per-request model would tie up one idle thread per in-flight request and collapse under load. The reactive event-loop model serves huge concurrency with a handful of threads because no thread sits blocked while waiting. The trade-off: you must stay non-blocking inside the gateway — no blocking JPA or synchronous calls on the event-loop threads.
+
+Q: What are Routes, Predicates, and Filters?
+A Route is the basic unit: an id, a destination URI, predicates, and filters. A Predicate is a condition that decides whether a route matches a request (e.g. Path=/api/books/**). A Filter modifies the request (pre) and response (post) — AddRequestHeader, auth, logging. The first route whose predicates all pass wins.
+
+Q: How does the gateway route dynamically instead of using hardcoded URLs?
+Route URIs use lb://SERVICE-NAME. The ReactiveLoadBalancerClientFilter sees the lb:// scheme, asks Spring Cloud LoadBalancer to resolve that name against the Eureka registry, picks a healthy instance round-robin, and rewrites the URI to its real host:port. Add a second instance and it's load-balanced automatically — no config change.
+
+Q: Global filter vs gateway filter?
+A gateway filter is attached to one route; a global filter applies to every route. Auth and logging are global. You implement a GlobalFilter bean — Spring auto-adds any GlobalFilter to the chain — with pre-logic before chain.filter(exchange) and post-logic in .then(...). getOrder() controls sequencing.
+
+Q: How do you authenticate at the gateway?
+A global filter reads the Authorization header, validates the JWT, and on failure sets 401 and calls setComplete() to short-circuit — the request never reaches a downstream service. Auth lives in one place instead of in every service.
+
+The client sends POST localhost:8085/api/borrows to the gateway. The logging global filter logs it; the auth filter validates the JWT and lets it through. The borrow-service route matches on Path=/api/borrows/** with URI lb://BORROW-SERVICE. The load-balancer filter resolves that name via the Eureka registry, picks a borrow-service instance, and forwards the request. Inside borrow-service, it validates the user and decrements the book via Feign clients to user-service and book-service — that's east-west traffic, protected by Resilience4j circuit breakers with fallbacks. The borrow record is saved, and a book-borrowed event is published to Kafka. notification-service consumes that event asynchronously and writes a notification. The response flows back up through the gateway, where the logging filter records the status and latency
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

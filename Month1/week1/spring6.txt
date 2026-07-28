@@ -1,0 +1,40 @@
+Each dice has 6 faces
+Two dice rolled together
+
+Total outcomes = 6 × 6 = 36
+
+Dice 1 + Dice 2 = 7
+
+(1, 6) → 1+6 = 7 ✅
+(2, 5) → 2+5 = 7 ✅
+(3, 4) → 3+4 = 7 ✅
+(4, 3) → 4+3 = 7 ✅
+(5, 2) → 5+2 = 7 ✅
+(6, 1) → 6+1 = 7 ✅
+
+Total favorable = 6
+
+Probability = Favorable / Total
+            = 6 / 36
+            = 1/6
+
+Answer: 1/6 ✅
+
+--------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
