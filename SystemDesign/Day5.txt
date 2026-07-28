@@ -317,7 +317,98 @@ Every piece serves the Part 1 requirement: don't lose transactional notification
 
 Interview soundbite (full reliability): "Providers fail transiently, so I retry with exponential backoff plus jitter to give them room to recover and avoid retry storms. After a max retry count, messages go to a dead-letter queue — preserved for inspection, replay, and alerting rather than dropped. The key tension is that retries and at-least-once delivery risk duplicate sends that spam users, so I dedup on the idempotency key before sending, tracking sent notifications in Redis. That gives at-least-once delivery with at-most-once user impact — effectively exactly-once."
 
+The final part of Day 75. We'll cover the data model (Framework Step 4, which we deferred because this system is about flow more than storage), then the deep-dive topics interviewers probe: priority, user preferences, rate limiting, and delivery tracking. Each reuses the week's concepts.
 
+The Data Model (Framework Step 4)
+
+Unlike TinyURL (one simple entity), a notification system has a few entities. The key ones:
+
+1. Notification (the tracking record):
+
+notification_id   (PK)
+user_id
+type              (ORDER_SHIPPED, OTP, PROMO...)
+channel           (push/email/sms)
+status            (QUEUED → SENT → DELIVERED → FAILED)
+idempotency_key   (for dedup — indexed)
+created_at, updated_at
+
+
+Stored for a retention window (~30 days, Part 2) for tracking/debugging, then archived/deleted. This is write-heavy (billions/day) with simple key-based access → shard by notification_id or user_id (Day 72). A wide-column store like Cassandra fits well — high write throughput, time-series-ish data (Day 72's write-heavy → wide-column instinct).
+
+2. User Preferences:
+
+user_id           (PK)
+channel_prefs     ({push: true, email: true, sms: false})
+type_prefs        ({promotional: false, transactional: true})
+quiet_hours       (optional: don't disturb 10pm–7am)
+
+This is read on every send (check before sending) but rarely written → read-heavy, cache it in Redis (Day 73). Proportional to users, not notifications, so it's small. This is a nice contrast to note: the notification records are write-heavy, but preferences are read-heavy → different storage/caching treatment for each.
+
+3. Device Registry (for push, Part 3):
+
+user_id → [device_token, platform, last_seen]
+
+Maps users to their devices for push delivery. Updated when tokens change; stale tokens removed on provider rejection.
+
+4. Templates (optional): notification templates with variables ("Hi {name}, order {orderId} shipped"), so content isn't hardcoded. Rendered at send time.
+
+The insight: different entities have different access patterns → different storage/caching. Notifications: write-heavy → Cassandra. Preferences: read-heavy → cached in Redis. This polyglot treatment (Day 72) is exactly the right instinct.
+
+Deep Dive 1: Priority — Transactional vs Promotional
+
+The problem (from Parts 1–2): an OTP (urgent, user is waiting) must not get stuck behind 10 million marketing emails in the queue. If everything shares one queue, a campaign blast delays urgent notifications catastrophically.
+
+The solution — priority queues (separate queues by priority):
+
+High-priority queue for transactional (OTP, password reset, security alerts) — drained first, with dedicated workers, aggressive retries.
+Low-priority queue for promotional (marketing, digests) — drained when capacity allows, can be delayed without harm.
+
+Workers process high-priority first (or dedicated worker pools per priority). So an OTP jumps ahead of the marketing backlog and arrives in seconds, while the campaign drains in the background.
+
+Say it: "I'd separate queues by priority — transactional notifications like OTPs go to a high-priority queue drained first, promotional to a low-priority queue drained with spare capacity. That guarantees an urgent OTP isn't stuck behind a million marketing emails." (This directly solves the Part 2 latency-depends-on-type requirement — traceability again.)
+
+This composes with the per-channel queues from Part 4: you get a grid of (channel × priority) — e.g. high-priority SMS, low-priority email. In practice, priority within each channel queue.
+
+Deep Dive 2: User Preferences & Compliance
+
+Covered the storage above; the logic:
+
+Check preferences before sending (in the processor, Part 4) — opted out of SMS? Skip SMS. Opted out of promotional? Drop promotional notifications to that user entirely.
+Quiet hours — defer non-urgent notifications during the user's sleep hours (transactional still goes through — an OTP at 2am is fine; a marketing push isn't).
+Compliance: in many regions, sending marketing to opted-out users is illegal (GDPR, TCPA). So preference-checking isn't just polish — it's a legal requirement. Worth stating: "preference enforcement is also a compliance requirement, not just UX."
+Caching: since preferences are checked on every send (billions/day), cache them in Redis (Day 73) — a preference lookup can't be a slow DB hit on the hot path.
+Deep Dive 3: Rate Limiting (Day 73 applied)
+
+Two kinds of rate limiting here, both important:
+
+1. Per-user rate limiting (avoid annoying users): don't send one user 50 notifications in an hour (bad experience → they disable notifications entirely, or churn). Cap per-user notification frequency. "Limit each user to N notifications per hour, batching or dropping low-priority ones over the limit." Uses the token bucket + Redis approach from Day 73 (counters in Redis, global across workers).
+
+2. Per-provider rate limiting (respect provider limits): APNs/Twilio/SendGrid impose their own rate limits — exceed them and they reject or ban you. So workers must throttle outbound calls per provider to stay under limits. The per-channel worker pools (Part 4) make this natural — each channel throttles to its provider's ceiling. (This connects to why we separated queues per channel — independent rate control.)
+
+Say it: "Two rate limits: per-user to avoid overwhelming people — capping frequency with a token bucket in Redis — and per-provider to stay within APNs/Twilio limits, throttled at the channel worker level."
+
+Deep Dive 4: Delivery Tracking & Status
+
+Callers and users want to know: did it arrive? We track status transitions (QUEUED → SENT → DELIVERED → FAILED):
+
+SENT = we handed it to the provider.
+DELIVERED = the provider confirmed delivery (many providers send webhooks/callbacks — e.g. APNs/SendGrid call back "delivered" or "bounced"). We consume these to update status.
+FAILED = exhausted retries → DLQ (Part 5).
+
+This feeds the GET /notifications/{id} status endpoint (Part 2) and analytics (delivery rates per channel, bounce rates). The status updates are high-volume writes → the write-heavy Cassandra store handles them. (For analytics — delivery rates, open rates — aggregate asynchronously via a queue + consumer, exactly like TinyURL's click analytics in Day 74. Same pattern reused.)
+
+The Complete System (Day 75 assembled)
+
+Tying it all together:
+
+Ingestion (202 + queue) → Processor (fan-out, preference check, dedup) → per-channel + per-priority queues → stateless worker pools (retries, backoff, DLQ, idempotency) → channel adapters → providers.
+Preferences cached in Redis; notification status in write-heavy Cassandra; device tokens in a registry.
+Reliability via retries + DLQ + idempotency; priority via separate queues; rate limiting per-user and per-provider via Redis; tracking via provider webhooks.
+
+Every component traces to a Part 1 requirement — multi-channel (adapters), throughput/bursty (queues + workers), reliability (retries/DLQ/idempotency), priority (priority queues), preferences (checks + compliance). The full week deployed on a write-heavy, fan-out-centric system — a completely different shape from TinyURL, solved with the same toolkit.
+
+Interview soundbite: "Data-wise, notification records are write-heavy so I'd use Cassandra sharded by user, while preferences are read-heavy so they're cached in Redis and checked on every send — also a compliance requirement. For priority, separate high- and low-priority queues so OTPs aren't stuck behind marketing blasts. Rate limiting is two-fold: per-user via a Redis token bucket to avoid overwhelming people, and per-provider at the worker level to respect APNs/Twilio limits. Delivery status is tracked via provider webhooks feeding a status store and async analytics."
 
 
 

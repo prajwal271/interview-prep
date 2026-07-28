@@ -778,6 +778,258 @@ def render_markdown(text: str) -> str:
 
 # ---------- page + index templates --------------------------------------
 
+# ---------- StudyDeck post-processing ------------------------------------
+# Everything below rewrites the ALREADY-RENDERED HTML. render_txt /
+# render_markdown and the block classifier are never touched, so output stays
+# deterministic. Passes: number/id headings -> callouts -> code panels.
+
+NUM_MARKER_RE = re.compile(
+    r"^(?:(?P<word>PART|STEP|TOPIC|PROBLEM|SOLUTION|CHAPTER|DAY)\s+(?P<wn>\d+)"
+    r"|(?P<dec>\d+(?:\.\d+)+))\b[\s—:.\-)]*",
+    re.IGNORECASE,
+)
+
+FRIENDLY_LANG = {
+    "java": "Java", "sql": "SQL", "xml": "XML", "bash": "bash", "sh": "bash",
+    "shell": "bash", "console": "console", "json": "JSON", "yaml": "YAML",
+    "yml": "YAML", "groovy": "Gradle", "properties": "properties",
+    "kotlin": "Kotlin", "http": "HTTP", "plaintext": "text", "text": "text",
+}
+
+# (leading-text regex, kind, label, icon). Order matters (specific first).
+CUE_RULES = [
+    (re.compile(r"^interview[- ]?ready answer", re.I), "interview", "Interview answer", "🎤"),
+    (re.compile(r"^interview answer", re.I), "interview", "Interview answer", "🎤"),
+    (re.compile(r"^(?:interview soundbite|soundbite)", re.I), "interview", "Soundbite", "🎤"),
+    (re.compile(r"^analogy", re.I), "analogy", "Analogy", "💡"),
+    (re.compile(r"^rule of thumb", re.I), "rule", "Rule of thumb", "📏"),
+    (re.compile(r"^(?:remember|key takeaway|takeaway)", re.I), "remember", "Remember", "📌"),
+    (re.compile(r"^why\b", re.I), "why", "Why", "❓"),           # blockquote-only
+    (re.compile(r"^examples?", re.I), "example", "Example", "🧪"),
+    (re.compile(r"^note", re.I), "note", "Note", "📝"),
+    (re.compile(r"^(?:warning|caution)", re.I), "warning", "Warning", "⚠️"),
+    (re.compile(r"^(?:gotcha|the gotcha)", re.I), "gotcha", "Gotcha", "⚠️"),
+]
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain(fragment: str) -> str:
+    """Visible text of an HTML fragment."""
+    return html.unescape(_TAG_RE.sub("", fragment)).strip()
+
+
+def slug_heading(plain: str, seen: set[str]) -> str:
+    base = slugify(plain) or "section"
+    if base[0].isdigit():
+        base = "s" + base
+    slug = base
+    i = 2
+    while slug in seen:
+        slug = f"{base}-{i}"
+        i += 1
+    seen.add(slug)
+    return slug
+
+
+def number_and_id_headings(html_body: str, toc: list) -> str:
+    """Add ids + hover anchors to h2/h3.section, split a leading PART/STEP/TOPIC/
+    decimal marker into a number chip, and collect a TOC."""
+    seen: set[str] = set()
+
+    def repl(m: re.Match) -> str:
+        tag, inner = m.group(1), m.group(2)
+        plain = _plain(inner)
+        hid = slug_heading(plain, seen)
+        anchor = f'<a class="h-anchor" href="#{hid}" aria-hidden="true">#</a>'
+        mm = NUM_MARKER_RE.match(plain)
+        if mm:
+            chip = f"{mm.group('word').title()} {mm.group('wn')}" if mm.group("word") else mm.group("dec")
+            rest = plain[mm.end():].strip()
+            lvl = 3 if (tag == "h3" or mm.group("dec")) else 2
+            toc.append((lvl, hid, chip, rest))
+            return (f'<{tag} id="{hid}" class="section has-num">{anchor}'
+                    f'<span class="sec-num">{html.escape(chip)}</span>{html.escape(rest)}</{tag}>')
+        toc.append((3 if tag == "h3" else 2, hid, "", plain))
+        return f'<{tag} id="{hid}" class="section">{anchor}{inner}</{tag}>'
+
+    return re.sub(r'<(h2|h3) class="section">(.*?)</\1>', repl, html_body, flags=re.S)
+
+
+def _match_cue(lead: str, blockquote: bool):
+    for rgx, kind, label, icon in CUE_RULES:
+        if kind == "why" and not blockquote:
+            continue
+        m = rgx.match(lead)
+        if m:
+            return kind, label, icon, m.end(), lead[:m.end()]
+    return None
+
+
+def _strip_label_from_inner(inner: str, matched_text: str) -> str:
+    """Remove the leading cue label (bare or wrapped in <strong>/<b>/<em>) plus a
+    trailing separator, keeping the rest of the fragment intact."""
+    m = re.match(r"\s*<(strong|b|em)>\s*(.*?)\s*</\1>\s*[:：—\-]?\s*", inner, re.S | re.I)
+    if m and _plain(m.group(2)).rstrip(":：").strip().lower().startswith(matched_text.lower()):
+        return inner[m.end():].lstrip()
+    m2 = re.match(re.escape(matched_text) + r"\s*[:：—\-]?\s*", inner, re.I)
+    if m2:
+        return inner[m2.end():].lstrip()
+    return inner
+
+
+def _callout(kind: str, label: str, icon: str, body: str) -> str:
+    return (f'<aside class="callout callout-{kind}"><div class="callout-label">'
+            f'<span class="ic">{icon}</span>{html.escape(label)}</div>'
+            f'<div class="callout-body">{body}</div></aside>')
+
+
+def _convert_blockquotes(html_body: str) -> str:
+    def repl(m: re.Match) -> str:
+        inner = m.group(1)
+        hit = _match_cue(_plain(inner), blockquote=True)
+        if not hit:
+            return m.group(0)
+        kind, label, icon, _end, matched = hit
+        body = _strip_label_from_inner(inner, matched) or inner
+        return _callout(kind, label, icon, body)
+
+    return re.sub(r"<blockquote>(.*?)</blockquote>", repl, html_body, flags=re.S)
+
+
+def _convert_prose_callouts(html_body: str) -> str:
+    def repl(m: re.Match) -> str:
+        inner = m.group(1)
+        pm = re.match(r"\s*<p>(.*?)</p>", inner, re.S)
+        if not pm:
+            return m.group(0)
+        lead = _plain(pm.group(1))
+        hit = _match_cue(lead, blockquote=False)
+        if not hit:
+            return m.group(0)
+        kind, label, icon, end, matched = hit
+        lone = kind in ("analogy", "gotcha", "remember", "rule") and lead.lower() == label.lower()
+        if not re.match(r"^\s*[:：]", lead[end:]) and not lone:
+            return m.group(0)
+        first = _strip_label_from_inner(pm.group(1), matched)
+        body = (f"<p>{first}</p>" if first.strip() else "") + inner[pm.end():]
+        return _callout(kind, label, icon, body)
+
+    return re.sub(r'<div class="prose">(.*?)</div>', repl, html_body, flags=re.S)
+
+
+def _convert_p_callouts(html_body: str) -> str:
+    def repl(m: re.Match) -> str:
+        inner = m.group(1)
+        lead = _plain(inner)
+        hit = _match_cue(lead, blockquote=False)
+        if not hit:
+            return m.group(0)
+        kind, label, icon, end, matched = hit
+        if not re.match(r"^\s*[:：]", lead[end:]):
+            return m.group(0)
+        body = _strip_label_from_inner(inner, matched)
+        return _callout(kind, label, icon, f"<p>{body}</p>")
+
+    return re.sub(r"<p>(.*?)</p>", repl, html_body, flags=re.S)
+
+
+def wrap_callouts(html_body: str) -> str:
+    html_body = _convert_blockquotes(html_body)
+    html_body = _convert_prose_callouts(html_body)
+    return _convert_p_callouts(html_body)
+
+
+def wrap_code(html_body: str) -> str:
+    def repl(m: re.Match) -> str:
+        lang = m.group("lang") or ""
+        friendly = FRIENDLY_LANG.get(lang.lower(), lang or "text")
+        cls = f' class="language-{lang}"' if lang else ""
+        return (f'<figure class="code"><figcaption class="code-head">'
+                f'<span class="code-lang">{html.escape(friendly)}</span>'
+                f'<button class="code-copy" type="button" aria-label="Copy code">Copy</button>'
+                f'</figcaption><pre class="code-block"><code{cls}>{m.group("code")}</code></pre></figure>')
+
+    return re.sub(
+        r'<pre class="code-block"><code(?: class="language-(?P<lang>[\w.+-]+)")?>(?P<code>.*?)</code></pre>',
+        repl, html_body, flags=re.S,
+    )
+
+
+def build_toc(toc: list) -> str:
+    if len(toc) < 2:
+        return ""
+    items = []
+    for lvl, hid, chip, label in toc:
+        sub = ' class="sub"' if lvl == 3 else ""
+        text = (html.escape(chip) + " " if chip else "") + html.escape(label)
+        items.append(f'<li{sub}><a href="#{hid}">{text}</a></li>')
+    return ('<details class="page-toc" open><summary>On this page'
+            f'<span class="toc-count">{len(toc)} sections</span></summary>'
+            f'<nav aria-label="On this page"><ol>{"".join(items)}</ol></nav></details>')
+
+
+def studydeck(content_html: str) -> tuple[str, list]:
+    """Run the full post-pass; return (rewritten_html, toc)."""
+    toc: list = []
+    content_html = number_and_id_headings(content_html, toc)
+    content_html = wrap_callouts(content_html)
+    content_html = wrap_code(content_html)
+    return content_html, toc
+
+
+LESSON_JS = r"""
+(function(){
+  var doc=document.documentElement;
+  var fill=document.querySelector('.read-progress>span');
+  var top=document.querySelector('.to-top');
+  var ticking=false;
+  function upd(){ticking=false;var max=doc.scrollHeight-doc.clientHeight;
+    if(fill)fill.style.width=(max>0?(doc.scrollTop/max*100):0)+'%';
+    if(top)top.classList.toggle('show',doc.scrollTop>600);}
+  addEventListener('scroll',function(){if(!ticking){ticking=true;requestAnimationFrame(upd);}},{passive:true});upd();
+  if(top)top.addEventListener('click',function(){scrollTo({top:0,behavior:'smooth'});});
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('.code-copy');if(!b)return;
+    var code=b.closest('figure.code').querySelector('code');if(!code)return;
+    navigator.clipboard.writeText(code.innerText).then(function(){
+      b.classList.add('copied');var t=b.textContent;b.textContent='Copied';
+      setTimeout(function(){b.classList.remove('copied');b.textContent=t;},1200);});});
+  var links=[].slice.call(document.querySelectorAll('.page-toc a[href^="#"]'));
+  if(links.length&&'IntersectionObserver'in window){
+    var map={};links.forEach(function(a){map[a.getAttribute('href').slice(1)]=a;});
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){
+      if(e.isIntersecting){links.forEach(function(a){a.classList.remove('active');});
+        var a=map[e.target.id];if(a)a.classList.add('active');}});},
+      {rootMargin:'-45% 0px -50% 0px'});
+    document.querySelectorAll('.section[id]').forEach(function(h){io.observe(h);});}
+  try{localStorage.setItem('read:'+location.pathname,'1');
+    localStorage.setItem('last',JSON.stringify({href:location.pathname,title:document.title.split(' · ')[0]}));}catch(e){}
+})();
+"""
+
+INDEX_JS = r"""
+(function(){
+  try{
+    var last=JSON.parse(localStorage.getItem('last')||'null');
+    var btn=document.getElementById('continue-btn');
+    if(last&&btn){btn.href=last.href;btn.querySelector('b').textContent=last.title||'';btn.hidden=false;}
+    document.querySelectorAll('ul.day-list a').forEach(function(a){
+      var p=new URL(a.getAttribute('href'),location).pathname;
+      if(localStorage.getItem('read:'+p))a.classList.add('read');});
+    document.querySelectorAll('.course-card').forEach(function(card){
+      var total=+card.dataset.total||0,read=0;
+      (card.dataset.paths||'').split('|').forEach(function(rel){
+        if(!rel)return;var p=new URL(rel,location).pathname;
+        if(localStorage.getItem('read:'+p))read++;});
+      var bar=card.querySelector('.progress span'),txt=card.querySelector('.progress-text');
+      if(bar&&total)bar.style.width=Math.round(read/total*100)+'%';
+      if(txt&&read)txt.textContent=read+' of '+total+' read';});
+  }catch(e){}
+})();
+"""
+
+
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -797,15 +1049,18 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     {group_crumb}
   </div>
 </header>
+<div class="read-progress" aria-hidden="true"><span></span></div>
 <main>
-  <h1 class="page-title">{title}</h1>
-  <p class="page-subtitle">{subtitle}</p>
+  {lesson_head}
+  {toc_html}
   {content}
   <nav class="pager">
     {prev_link}
     {next_link}
   </nav>
 </main>
+<button class="to-top" aria-label="Back to top">↑</button>
+<script>{lesson_js}</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/sql.min.js"></script>
@@ -835,15 +1090,14 @@ INDEX_TEMPLATE = """<!DOCTYPE html>
   </div>
 </header>
 <main>
-  <h1 class="page-title">{site_title}</h1>
-  <p class="page-subtitle">Interview-prep notes — tap any day to read.</p>
-  <div class="intro">
-    A revision-friendly view of every note in this repo. The source
-    <code>.txt</code> and <code>.md</code> files are never modified; this page
-    and everything it links to is generated by <code>build.py</code>.
-  </div>
+  <section class="hero">
+    <h1 class="page-title">{site_title}</h1>
+    <p class="hero-sub">{hero_sub}</p>
+    <a class="continue-btn" id="continue-btn" hidden href="#">Continue → <b></b></a>
+  </section>
   {body}
 </main>
+<script>{index_js}</script>
 </body>
 </html>
 """
@@ -856,7 +1110,29 @@ def build_index(pages: list[Page], colors: dict[str, str] | None = None) -> str:
     for p in pages:
         by_section.setdefault(p.section, {}).setdefault(p.group, []).append(p)
 
-    parts: list[str] = [f'<p class="note-count">{len(pages)} notes total</p>']
+    # course dashboard cards (one per subject) — overview + progress + continue
+    cards: list[str] = ['<div class="course-grid">']
+    for section, groups in by_section.items():
+        secpages = [p for grp in groups.values() for p in grp]
+        total = len(secpages)
+        cstyle = f' style="--accent: {colors[section]}"' if section in colors else ""
+        chips = "".join(f"<span>{html.escape(humanize_group(g))}</span>" for g in groups if g is not None)
+        if not chips:
+            chips = f'<span>{total} lesson{"s" if total != 1 else ""}</span>'
+        paths = "|".join(html.escape(p.rel_href) for p in secpages)
+        cards.append(
+            f'<a class="course-card" href="{html.escape(secpages[0].rel_href)}"'
+            f' data-total="{total}" data-paths="{paths}"{cstyle}>'
+            '<div class="course-spine"></div><div class="course-body">'
+            f'<h2>{html.escape(humanize_section(section))}'
+            f'<span class="lessons">{total} lesson{"s" if total != 1 else ""}</span></h2>'
+            '<div class="progress"><span></span></div>'
+            f'<p class="progress-text">{total} lesson{"s" if total != 1 else ""}</p>'
+            f'<div class="week-chips">{chips}</div></div></a>'
+        )
+    cards.append("</div>")
+
+    parts: list[str] = cards + [f'<p class="note-count">{len(pages)} notes total</p>']
     for section, groups in by_section.items():
         section_total = sum(len(v) for v in groups.values())
         style = f' style="--accent: {colors[section]}"' if section in colors else ""
@@ -1000,6 +1276,21 @@ def write_page(page: Page, prev: Page | None, nxt: Page | None, accent: str = ""
         group_crumb = ""
         subtitle = html.escape(section_label)
 
+    # StudyDeck post-pass: number/id headings, callouts, code panels, TOC.
+    content_html, toc = studydeck(content_html)
+    read_minutes = max(1, round(len(re.findall(r"\w+", text)) / 200))
+    kicker = f"Lesson {page.number}" if page.number else section_label
+    meta = f"<span>~{read_minutes} min read</span>"
+    if len(toc) >= 2:
+        meta += f"<span>{len(toc)} sections</span>"
+    lesson_head = (
+        '<div class="lesson-head">'
+        f'<p class="lesson-eyebrow"><span class="lesson-kicker">{html.escape(kicker)}</span> {subtitle}</p>'
+        f'<h1 class="page-title">{html.escape(display_title)}</h1>'
+        f'<p class="lesson-meta">{meta}</p></div>'
+    )
+    toc_html = build_toc(toc)
+
     def link(target: Page | None, kind: str) -> str:
         if target is None:
             return f'<a class="{kind} disabled"></a>'
@@ -1018,11 +1309,13 @@ def write_page(page: Page, prev: Page | None, nxt: Page | None, accent: str = ""
         index_href=index_href,
         section=html.escape(section_label),
         group_crumb=group_crumb,
-        subtitle=subtitle,
+        lesson_head=lesson_head,
+        toc_html=toc_html,
         content=content_html,
         prev_link=link(prev, "prev"),
         next_link=link(nxt, "next"),
         body_style=f' style="--accent: {accent}"' if accent else "",
+        lesson_js=LESSON_JS,
     )
     page.out_path.write_text(html_out, encoding="utf-8")
 
@@ -1046,7 +1339,14 @@ def main() -> None:
             written.add(page.out_path.resolve())
             print(f"  wrote {page.out_path.relative_to(OUTPUT_ROOT)}")
 
-    index_html = INDEX_TEMPLATE.format(site_title=html.escape(SITE_TITLE), body=build_index(pages, colors))
+    n_subjects = len(colors) or len({p.section for p in pages})
+    hero_sub = f"{len(pages)} lessons across {n_subjects} subjects — small steps, every day."
+    index_html = INDEX_TEMPLATE.format(
+        site_title=html.escape(SITE_TITLE),
+        hero_sub=html.escape(hero_sub),
+        body=build_index(pages, colors),
+        index_js=INDEX_JS,
+    )
     index_path = OUTPUT_ROOT / "index.html"
     index_path.write_text(index_html, encoding="utf-8")
     written.add(index_path.resolve())
