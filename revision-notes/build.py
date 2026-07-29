@@ -1212,6 +1212,27 @@ INDEX_JS = r"""
 """
 
 
+THEME_JS = r"""
+(function(){
+  var el=document.documentElement;
+  function hl(){var d=el.dataset.theme==='dark';
+    var l=document.getElementById('hljs-light'),k=document.getElementById('hljs-dark');
+    if(l)l.disabled=d; if(k)k.disabled=!d;}
+  try{var t=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    el.dataset.theme=t;}catch(e){el.dataset.theme='light';}
+  hl();
+  function setup(){var b=document.getElementById('theme-toggle');
+    function ic(){if(b)b.textContent=el.dataset.theme==='dark'?'☀️':'🌙';}
+    ic();
+    if(b)b.addEventListener('click',function(){
+      var n=el.dataset.theme==='dark'?'light':'dark';
+      el.dataset.theme=n;try{localStorage.setItem('theme',n);}catch(e){}
+      hl();ic();});}
+  if(document.readyState!=='loading')setup();else document.addEventListener('DOMContentLoaded',setup);
+})();
+"""
+
+
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1219,8 +1240,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title} · {site_title}</title>
 <link rel="stylesheet" href="{css_href}">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" id="hljs-light" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<link rel="stylesheet" id="hljs-dark" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script>{theme_js}</script>
 </head>
 <body{body_style}>
 <header class="site-header">
@@ -1229,6 +1251,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     <span class="crumb-sep">/</span>
     <span class="crumb">{section}</span>
     {group_crumb}
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch light or dark mode" title="Light / dark">🌙</button>
   </div>
 </header>
 <div class="read-progress" aria-hidden="true"><span></span></div>
@@ -1264,11 +1287,13 @@ INDEX_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{site_title}</title>
 <link rel="stylesheet" href="assets/style.css">
+<script>{theme_js}</script>
 </head>
 <body>
 <header class="site-header">
   <div class="nav-row">
     <strong>{site_title}</strong>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch light or dark mode" title="Light / dark">🌙</button>
   </div>
 </header>
 <main>
@@ -1498,6 +1523,7 @@ def write_page(page: Page, prev: Page | None, nxt: Page | None, accent: str = ""
         next_link=link(nxt, "next"),
         body_style=f' style="--accent: {accent}"' if accent else "",
         lesson_js=LESSON_JS,
+        theme_js=THEME_JS,
     )
     page.out_path.write_text(html_out, encoding="utf-8")
 
@@ -1530,6 +1556,7 @@ def main() -> None:
         hero_sub=html.escape(hero_sub),
         body=build_index(pages, colors),
         index_js=INDEX_JS,
+        theme_js=THEME_JS,
     )
     index_path = OUTPUT_ROOT / "index.html"
     index_path.write_text(index_html, encoding="utf-8")
