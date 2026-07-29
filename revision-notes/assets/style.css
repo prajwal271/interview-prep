@@ -802,4 +802,17 @@ ul.day-list li a.read .num::after{content:"✓";margin-left:6px;color:#10b981;fo
 
 /* soft divider before each major section for scannability */
 h2.section{margin-top:52px}
-h2.section::after{content:"";position:absolute;left:-14px;right:0;bottom:-1px;height:0}
+
+/* glossary-style definitions: coloured lead-in term + soft accent rail */
+.prose .def{border-left:3px solid var(--accent-soft);padding:2px 0 2px 14px;margin:12px 0}
+.def-term{color:var(--accent-strong);font-weight:700}
+.def-term::after{content:" — ";color:var(--fg-muted);font-weight:400}
+
+/* vertical flow stepper (e.g. a lifecycle) */
+ol.flow{list-style:none;counter-reset:flow;margin:24px 0;padding:0}
+ol.flow li{counter-increment:flow;position:relative;padding:1px 0 20px 44px;line-height:1.6;color:var(--fg)}
+ol.flow li::before{content:counter(flow);position:absolute;left:0;top:-2px;width:29px;height:29px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.8rem;font-weight:700;color:#fff;background:var(--accent);border-radius:50%;box-shadow:0 1px 3px color-mix(in srgb,var(--accent) 42%,transparent)}
+@media (prefers-color-scheme:dark){ol.flow li::before{color:#0f1216}}
+ol.flow li::after{content:"";position:absolute;left:13.5px;top:30px;bottom:0;width:2px;background:color-mix(in srgb,var(--accent) 32%,transparent)}
+ol.flow li:last-child{padding-bottom:0}
+ol.flow li:last-child::after{display:none}

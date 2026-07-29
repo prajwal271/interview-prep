@@ -975,7 +975,7 @@ def build_toc(toc: list) -> str:
 
 # Bullet / ordered markers as they appear in escaped .txt prose (one <p> per
 # source line). '->' becomes '-&gt;', '>' becomes '&gt;' after html.escape.
-_BULLET_RE = re.compile(r"^\s*(?:-&gt;|=&gt;|&gt;|[-–—*•·▪◦‣➤▸»→])\s+(?P<rest>.*\S.*)$", re.S)
+_BULLET_RE = re.compile(r"^\s*(?:[-–—]{1,4}&gt;|=+&gt;|&gt;|[-–—*•·▪◦‣➤▸»→])\s+(?P<rest>.*\S.*)$", re.S)
 _ORDERED_RE = re.compile(r"^\s*(?P<n>\d{1,3}|[a-zA-Z])[.)]\s+(?P<rest>.*\S.*)$", re.S)
 
 
@@ -1021,13 +1021,105 @@ def group_lists(html_body: str) -> str:
     return re.sub(r'<div class="prose">(.*?)</div>', process, html_body, flags=re.S)
 
 
+_FLOW_ARROWS = {"↓", "⬇", "⬇️", "⇩", "▼", "|", "v", "V", "→", "➜", "➔", "⟶"}
+
+
+def convert_flows(html_body: str) -> str:
+    """A .prose block that is steps separated by lone ↓/→ arrows becomes a
+    numbered vertical stepper (e.g. a Bean lifecycle)."""
+
+    def repl(m: re.Match) -> str:
+        ps = re.findall(r"<p>(.*?)</p>", m.group(1), re.S)
+        if not ps:
+            return m.group(0)
+        arrows = sum(1 for p in ps if _plain(p) in _FLOW_ARROWS)
+        steps = [p for p in ps if _plain(p) not in _FLOW_ARROWS]
+        if arrows >= 2 and len(steps) >= 3 and arrows >= len(steps) - 2:
+            return '<ol class="flow">' + "".join(f"<li>{s}</li>" for s in steps) + "</ol>"
+        return m.group(0)
+
+    return re.sub(r'<div class="prose">(.*?)</div>', repl, html_body, flags=re.S)
+
+
+# words that reveal a "term" is really a sentence, so it's not a definition
+_DEF_VERBS = {
+    "is", "are", "was", "were", "tells", "tell", "look", "looks", "mean", "means",
+    "create", "creates", "has", "have", "will", "do", "does", "can", "find", "finds",
+    "read", "reads", "wire", "wires", "extend", "extends", "need", "needs", "get",
+    "gets", "run", "runs", "call", "calls", "use", "uses", "inject", "injects",
+    "hand", "hands", "know", "knows", "search", "searches", "should", "must",
+    "asks", "walks", "sees", "matters", "solves", "picks", "starts", "works",
+    "happens", "comes", "goes", "maps", "sits", "lives", "wraps", "adds", "breaks",
+    "hides", "feel", "feels", "talks", "points", "gives", "takes", "makes",
+}
+
+# first words that signal a sentence lead-in rather than a real term
+_DEF_STARTERS = {
+    "the", "a", "an", "it", "its", "your", "you", "this", "that", "these", "those",
+    "one", "how", "why", "when", "where", "what", "if", "but", "so", "we", "i",
+    "they", "he", "she", "in", "on", "at", "for", "with", "without", "by", "to",
+    "of", "and", "or", "here", "there", "now", "then", "first", "second", "third",
+    "every", "each", "some", "most", "many", "all", "real", "basically", "instead",
+    "both", "either", "once", "after", "before", "during", "because", "since",
+}
+
+
+def _is_def_term(term: str) -> bool:
+    words = term.split()
+    if not (1 <= len(words) <= 6) or len(term) > 48:
+        return False
+    if any(c in term for c in ".?!"):
+        return False
+    if words[0].lower().strip(":,()") in _DEF_STARTERS:
+        return False
+    return not any(w.lower().strip(":,()") in _DEF_VERBS for w in words)
+
+
+def style_definitions(html_body: str) -> str:
+    """Style 'Term : explanation' / '@Anno — explanation' lines as glossary
+    entries (coloured lead-in term). Only inside .prose (never markdown)."""
+
+    def repl_div(m: re.Match) -> str:
+        def repl_p(pm: re.Match) -> str:
+            plain = _plain(pm.group(1))
+            cm = re.match(r"^(?P<term>[^:]{1,48}?)\s*:\s+(?P<rest>\S.*)$", plain, re.S)
+            if not cm and plain.startswith("@"):
+                cm = re.match(r"^(?P<term>@\S[^—–:]{0,46}?)\s+[—–]\s+(?P<rest>\S.*)$", plain, re.S)
+            if not cm:
+                return pm.group(0)
+            term, rest = cm.group("term").strip(), cm.group("rest").strip()
+            if not _is_def_term(term):
+                return pm.group(0)
+            return f'<p class="def"><b class="def-term">{html.escape(term)}</b> {html.escape(rest)}</p>'
+
+        return '<div class="prose">' + re.sub(r"<p>(.*?)</p>", repl_p, m.group(1), flags=re.S) + "</div>"
+
+    return re.sub(r'<div class="prose">(.*?)</div>', repl_div, html_body, flags=re.S)
+
+
+def inline_pass(html_body: str) -> str:
+    """Render leftover markdown-ish emphasis the notes use in plain .txt:
+    `code`, **bold**, and '-->' style arrows. Never touches <pre> code."""
+    parts = re.split(r"(<pre.*?</pre>)", html_body, flags=re.S)
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        seg = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", seg)
+        seg = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", seg)
+        seg = re.sub(r"(?:[-–—]{2,4}|=+)&gt;", "→", seg)
+        parts[i] = seg
+    return "".join(parts)
+
+
 def studydeck(content_html: str) -> tuple[str, list]:
     """Run the full post-pass; return (rewritten_html, toc)."""
     toc: list = []
     content_html = number_and_id_headings(content_html, toc)
+    content_html = convert_flows(content_html)
     content_html = group_lists(content_html)
     content_html = wrap_callouts(content_html)
+    content_html = style_definitions(content_html)
     content_html = wrap_code(content_html)
+    content_html = inline_pass(content_html)
     return content_html, toc
 
 
