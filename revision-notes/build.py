@@ -1507,7 +1507,9 @@ def main() -> None:
     if not pages:
         print("No .txt/.md notes found in any topic folder.")
         return
-    colors = assign_section_colors(pages)
+    # One committed accent site-wide (Sunset Blush coral) — set in CSS, so no
+    # per-section --accent is injected (a single consistent accent reads premium).
+    colors: dict[str, str] = {}
     # prev/next chain runs within each section, in discovery order.
     by_section: dict[str, list[Page]] = {}
     for p in pages:

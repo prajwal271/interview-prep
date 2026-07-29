@@ -5,23 +5,25 @@
 
 :root {
   /* light theme */
-  --bg: #faf8f4;
-  --bg-soft: #f1eee6;
-  --bg-card: #fffdf9;
-  --fg: #262420;
-  --fg-soft: #5b564c;
-  --fg-muted: #8a847a;
-  --accent: #4b6bfb;   /* per-topic accent; overridden inline by build.py */
-  --accent-strong: color-mix(in srgb, var(--accent) 82%, #000);
-  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
-  --accent-tint: color-mix(in srgb, var(--accent) 6%, transparent);
-  --border: #e7e1d5;
-  --border-soft: #f0ebe1;
-  --code-bg: #f4f1ea;
-  --code-fg: #262420;
-  --diagram-bg: #f5f2ea;
-  --diagram-border: #cec6b5;
-  --kbd-bg: #efe9dd;
+  /* Sunset Blush — warm cream base (60%), soft warm surfaces (30%),
+     one coral accent (10%). */
+  --bg: #fdf6f0;
+  --bg-soft: #f7ece2;
+  --bg-card: #ffffff;
+  --fg: #3a2c2a;
+  --fg-soft: #6b5750;
+  --fg-muted: #9a857b;
+  --accent: #e8734a;   /* the single committed accent (coral) */
+  --accent-strong: color-mix(in srgb, var(--accent) 76%, #000);
+  --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
+  --accent-tint: color-mix(in srgb, var(--accent) 7%, transparent);
+  --border: #ecddce;
+  --border-soft: #f4e9dc;
+  --code-bg: #f8efe6;
+  --code-fg: #3a2c2a;
+  --diagram-bg: #f8efe5;
+  --diagram-border: #ddc9b6;
+  --kbd-bg: #f1e6d8;
   --shadow: 0 1px 2px rgba(20, 25, 40, 0.04), 0 4px 12px rgba(20, 25, 40, 0.04);
   --radius: 10px;
   --radius-sm: 6px;
@@ -34,23 +36,24 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1b1a17;
-    --bg-soft: #24221e;
-    --bg-card: #22201d;
-    --fg: #ece9e2;
-    --fg-soft: #b3a99c;
-    --fg-muted: #837b6d;
-    --accent: #7ea2ff;   /* per-topic accent; overridden inline by build.py */
-    --accent-strong: color-mix(in srgb, var(--accent) 72%, #fff);
-    --accent-soft: color-mix(in srgb, var(--accent) 26%, transparent);
-    --accent-tint: color-mix(in srgb, var(--accent) 12%, transparent);
-    --border: #38342d;
-    --border-soft: #2a2722;
-    --code-bg: #161512;
-    --code-fg: #ece9e2;
-    --diagram-bg: #22201d;
-    --diagram-border: #47423a;
-    --kbd-bg: #302c26;
+    /* Sunset Blush — warm espresso base, coral accent (brightened for dark) */
+    --bg: #1f1815;
+    --bg-soft: #2a211c;
+    --bg-card: #271f1a;
+    --fg: #f2e8e0;
+    --fg-soft: #bda99b;
+    --fg-muted: #8f7d6f;
+    --accent: #ff8a5c;   /* coral, brightened for dark */
+    --accent-strong: color-mix(in srgb, var(--accent) 80%, #fff);
+    --accent-soft: color-mix(in srgb, var(--accent) 24%, transparent);
+    --accent-tint: color-mix(in srgb, var(--accent) 13%, transparent);
+    --border: #3e352d;
+    --border-soft: #2e2620;
+    --code-bg: #17110e;
+    --code-fg: #f2e8e0;
+    --diagram-bg: #271f1a;
+    --diagram-border: #4a3f35;
+    --kbd-bg: #33291f;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px rgba(0, 0, 0, 0.3);
   }
 }
@@ -73,11 +76,11 @@ body {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-strong);
   text-decoration: none;
   transition: color 0.15s ease;
 }
-a:hover { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 3px; }
+a:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 
 /* ---------- sticky header ---------- */
 
@@ -810,8 +813,8 @@ h2.section{margin-top:52px}
 
 /* highlighted paragraph — background fill, text unchanged (author marks with
    '!!' / '==' / '>>', or a summary/recap lead-in) */
-p.hl{background:color-mix(in srgb,#facc15 22%,var(--bg-card));border-left:4px solid #f4b400;padding:11px 15px;margin:16px 0;border-radius:0 var(--radius-sm) var(--radius-sm) 0}
-@media (prefers-color-scheme:dark){p.hl{background:color-mix(in srgb,#facc15 15%,var(--bg-card))}}
+p.hl{background:color-mix(in srgb,#f4b860 26%,var(--bg-card));border-left:4px solid #e8a24a;padding:11px 15px;margin:16px 0;border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+@media (prefers-color-scheme:dark){p.hl{background:color-mix(in srgb,#f4b860 16%,var(--bg-card))}}
 .prose p.hl{line-height:1.72}
 
 /* vertical flow stepper (e.g. a lifecycle) */
