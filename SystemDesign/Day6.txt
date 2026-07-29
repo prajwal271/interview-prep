@@ -1,0 +1,56 @@
+A standard system design interview is ~45 minutes. Here's how to spend it:
+
+Minutes 0–5: Requirements & Scope (Framework Step 1)
+
+Clarify functional + non-functional requirements, pin down scope.
+Do NOT start drawing. This is the discipline. Juniors draw immediately; you ask questions.
+Output: a short list of what's in scope, the key non-functional drivers (scale, read/write ratio, latency, consistency priority).
+Signal sent: "This person defines the problem before solving it." Biggest seniority signal, spent early.
+
+Minutes 5–10: Estimation (Framework Step 2)
+
+Back-of-envelope: QPS (read & write), storage, bandwidth. State assumptions out loud, round hard.
+Derive the headline number (read:write ratio, or bursty-ness) that will drive your architecture.
+Signal sent: "This person's design will be grounded in numbers, not vibes."
+
+Minutes 10–15: API + Data Model (Framework Steps 3–4)
+
+Define 2–3 core API endpoints (the contract).
+Sketch the data model / key entities → make (and justify) the SQL vs NoSQL call.
+Signal sent: concrete thinking, clear on what the system actually does.
+
+Minutes 15–25: High-Level Design (Framework Step 5)
+
+Now you draw. Client → LB → app servers → cache → DB. Get one end-to-end request flow working on the board — simple and correct before optimizing.
+Walk the interviewer through a request as you draw it.
+Signal sent: can translate requirements into a working architecture.
+
+Minutes 25–40: Scale & Deep Dive (Framework Step 6) — the biggest chunk
+
+Take the simple design and scale it to your Step 2 numbers: add caching, replication, sharding, queues, CDN, rate limiting — each with a stated trade-off.
+This is a dialogue — the interviewer will steer ("go deeper on the database," "what about X?"). Follow their lead; this is where they assess depth.
+Identify bottlenecks, address them, name trade-offs. This is where senior candidates separate.
+
+Minutes 40–45: Wrap-up & Follow-ups
+
+Summarize the design, acknowledge trade-offs, mention what you'd do with more time (things you scoped out).
+Handle final probes.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

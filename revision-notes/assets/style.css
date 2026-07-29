@@ -803,10 +803,16 @@ ul.day-list li a.read .num::after{content:"✓";margin-left:6px;color:#10b981;fo
 /* soft divider before each major section for scannability */
 h2.section{margin-top:52px}
 
-/* glossary-style definitions: coloured lead-in term + soft accent rail */
-.prose .def{border-left:3px solid var(--accent-soft);padding:2px 0 2px 14px;margin:12px 0}
+/* glossary-style definitions: coloured lead-in term + soft accent rail + tint */
+.prose .def{border-left:3px solid var(--accent-soft);background:var(--accent-tint);padding:8px 14px;margin:10px 0;border-radius:0 var(--radius-sm) var(--radius-sm) 0}
 .def-term{color:var(--accent-strong);font-weight:700}
 .def-term::after{content:" — ";color:var(--fg-muted);font-weight:400}
+
+/* highlighted paragraph — background fill, text unchanged (author marks with
+   '!!' / '==' / '>>', or a summary/recap lead-in) */
+p.hl{background:color-mix(in srgb,#facc15 22%,var(--bg-card));border-left:4px solid #f4b400;padding:11px 15px;margin:16px 0;border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+@media (prefers-color-scheme:dark){p.hl{background:color-mix(in srgb,#facc15 15%,var(--bg-card))}}
+.prose p.hl{line-height:1.72}
 
 /* vertical flow stepper (e.g. a lifecycle) */
 ol.flow{list-style:none;counter-reset:flow;margin:24px 0;padding:0}

@@ -1070,6 +1070,10 @@ def _is_def_term(term: str) -> bool:
         return False
     if any(c in term for c in ".?!"):
         return False
+    # real glossary terms are Capitalised or @Annotations — a lowercase lead
+    # (port, username, driver-class-name…) is config, not a definition.
+    if not (term[:1].isupper() or term.startswith("@")):
+        return False
     if words[0].lower().strip(":,()") in _DEF_STARTERS:
         return False
     return not any(w.lower().strip(":,()") in _DEF_VERBS for w in words)
@@ -1110,6 +1114,38 @@ def inline_pass(html_body: str) -> str:
     return "".join(parts)
 
 
+# Explicit highlight marker (author writes '!! …' / '== …' / '>> …' at line
+# start) and summary/recap lead-ins that deserve a highlighted background.
+# A marker must be followed by a space + text, so decoration runs like
+# "==========" or "!!!!" (no space) are never treated as highlights.
+_HL_MARKER_RE = re.compile(r"^\s*(?:!!+|==+|&gt;&gt;)\s+(?=\S)", re.S)
+_HL_CUE_RE = re.compile(
+    r"^(?:in summary|to summari[sz]e|in short|in a nutshell|in essence|overall|"
+    r"bottom line|in practice|simply put|the takeaway|key takeaway|remember this|tl;?dr)\b",
+    re.I,
+)
+
+
+def highlight_paragraphs(html_body: str) -> str:
+    """Give important paragraphs a highlighted background: any line the author
+    prefixes with '!!'/'=='/'>>' , plus summary/recap lead-ins."""
+
+    def repl_div(m: re.Match) -> str:
+        def repl_p(pm: re.Match) -> str:
+            inner = pm.group(1)
+            if _HL_MARKER_RE.match(inner):
+                stripped = _HL_MARKER_RE.sub("", inner, count=1)
+                if stripped.strip():
+                    return f'<p class="hl">{stripped}</p>'
+            if _HL_CUE_RE.match(_plain(inner)):
+                return f'<p class="hl">{inner}</p>'
+            return pm.group(0)
+
+        return '<div class="prose">' + re.sub(r"<p>(.*?)</p>", repl_p, m.group(1), flags=re.S) + "</div>"
+
+    return re.sub(r'<div class="prose">(.*?)</div>', repl_div, html_body, flags=re.S)
+
+
 def studydeck(content_html: str) -> tuple[str, list]:
     """Run the full post-pass; return (rewritten_html, toc)."""
     toc: list = []
@@ -1118,6 +1154,7 @@ def studydeck(content_html: str) -> tuple[str, list]:
     content_html = group_lists(content_html)
     content_html = wrap_callouts(content_html)
     content_html = style_definitions(content_html)
+    content_html = highlight_paragraphs(content_html)
     content_html = wrap_code(content_html)
     content_html = inline_pass(content_html)
     return content_html, toc
