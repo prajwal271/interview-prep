@@ -801,6 +801,10 @@ CUE_RULES = [
     (re.compile(r"^interview[- ]?ready answer", re.I), "interview", "Interview answer", "🎤"),
     (re.compile(r"^interview answer", re.I), "interview", "Interview answer", "🎤"),
     (re.compile(r"^(?:interview soundbite|soundbite)", re.I), "interview", "Soundbite", "🎤"),
+    (re.compile(r"^important", re.I), "important", "Important", "❗"),
+    (re.compile(r"^key (?:point|idea|insight)", re.I), "important", "Key point", "⭐"),
+    (re.compile(r"^(?:pitfall|trap|common mistake|common pitfall)", re.I), "important", "Pitfall", "⚠️"),
+    (re.compile(r"^pro[ -]?tip", re.I), "tip", "Pro tip", "💡"),
     (re.compile(r"^analogy", re.I), "analogy", "Analogy", "💡"),
     (re.compile(r"^rule of thumb", re.I), "rule", "Rule of thumb", "📏"),
     (re.compile(r"^(?:remember|key takeaway|takeaway)", re.I), "remember", "Remember", "📌"),
@@ -908,7 +912,7 @@ def _convert_prose_callouts(html_body: str) -> str:
         if not hit:
             return m.group(0)
         kind, label, icon, end, matched = hit
-        lone = kind in ("analogy", "gotcha", "remember", "rule") and lead.lower() == label.lower()
+        lone = kind in ("analogy", "gotcha", "remember", "rule", "important") and lead.lower() == label.lower()
         if not re.match(r"^\s*[:：]", lead[end:]) and not lone:
             return m.group(0)
         first = _strip_label_from_inner(pm.group(1), matched)
@@ -969,10 +973,59 @@ def build_toc(toc: list) -> str:
             f'<nav aria-label="On this page"><ol>{"".join(items)}</ol></nav></details>')
 
 
+# Bullet / ordered markers as they appear in escaped .txt prose (one <p> per
+# source line). '->' becomes '-&gt;', '>' becomes '&gt;' after html.escape.
+_BULLET_RE = re.compile(r"^\s*(?:-&gt;|=&gt;|&gt;|[-–—*•·▪◦‣➤▸»→])\s+(?P<rest>.*\S.*)$", re.S)
+_ORDERED_RE = re.compile(r"^\s*(?P<n>\d{1,3}|[a-zA-Z])[.)]\s+(?P<rest>.*\S.*)$", re.S)
+
+
+def group_lists(html_body: str) -> str:
+    """Turn runs of bullet/numbered <p> lines inside a .prose block into real
+    <ul>/<ol> lists (the .txt pipeline emits one <p> per line, so lists never
+    formed). Markdown lists already render natively and are left alone."""
+
+    def process(m: re.Match) -> str:
+        inner = m.group(1)
+        tokens: list[tuple[str, str]] = []
+        pos = 0
+        for pm in re.finditer(r"<p>(.*?)</p>", inner, re.S):
+            gap = inner[pos:pm.start()]
+            if gap.strip():                       # keep only non-whitespace gaps
+                tokens.append(("raw", gap))
+            tokens.append(("p", pm.group(1)))
+            pos = pm.end()
+        if inner[pos:].strip():
+            tokens.append(("raw", inner[pos:]))
+
+        out: list[str] = []
+        i = 0
+        while i < len(tokens):
+            kind, val = tokens[i]
+            if kind == "p" and (_BULLET_RE.match(val) or _ORDERED_RE.match(val)):
+                ltype = "ul" if _BULLET_RE.match(val) else "ol"
+                rx = _BULLET_RE if ltype == "ul" else _ORDERED_RE
+                items: list[str] = []
+                while i < len(tokens) and tokens[i][0] == "p":
+                    mm = rx.match(tokens[i][1])
+                    if not mm:
+                        break
+                    items.append(mm.group("rest").strip())
+                    i += 1
+                cls = ' class="tick"' if ltype == "ul" else ""
+                out.append(f"<{ltype}{cls}>" + "".join(f"<li>{it}</li>" for it in items) + f"</{ltype}>")
+            else:
+                out.append(val if kind == "raw" else f"<p>{val}</p>")
+                i += 1
+        return '<div class="prose">' + "".join(out) + "</div>"
+
+    return re.sub(r'<div class="prose">(.*?)</div>', process, html_body, flags=re.S)
+
+
 def studydeck(content_html: str) -> tuple[str, list]:
     """Run the full post-pass; return (rewritten_html, toc)."""
     toc: list = []
     content_html = number_and_id_headings(content_html, toc)
+    content_html = group_lists(content_html)
     content_html = wrap_callouts(content_html)
     content_html = wrap_code(content_html)
     return content_html, toc

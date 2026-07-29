@@ -5,23 +5,23 @@
 
 :root {
   /* light theme */
-  --bg: #fbfbfd;
-  --bg-soft: #f4f5f8;
-  --bg-card: #ffffff;
-  --fg: #1c1f24;
-  --fg-soft: #5b6470;
-  --fg-muted: #8a929d;
+  --bg: #faf8f4;
+  --bg-soft: #f1eee6;
+  --bg-card: #fffdf9;
+  --fg: #262420;
+  --fg-soft: #5b564c;
+  --fg-muted: #8a847a;
   --accent: #4b6bfb;   /* per-topic accent; overridden inline by build.py */
   --accent-strong: color-mix(in srgb, var(--accent) 82%, #000);
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --accent-tint: color-mix(in srgb, var(--accent) 6%, transparent);
-  --border: #e3e6ec;
-  --border-soft: #eef0f4;
-  --code-bg: #f5f6fa;
-  --code-fg: #1c1f24;
-  --diagram-bg: #f3f6fb;
-  --diagram-border: #b9c4d6;
-  --kbd-bg: #eef0f4;
+  --border: #e7e1d5;
+  --border-soft: #f0ebe1;
+  --code-bg: #f4f1ea;
+  --code-fg: #262420;
+  --diagram-bg: #f5f2ea;
+  --diagram-border: #cec6b5;
+  --kbd-bg: #efe9dd;
   --shadow: 0 1px 2px rgba(20, 25, 40, 0.04), 0 4px 12px rgba(20, 25, 40, 0.04);
   --radius: 10px;
   --radius-sm: 6px;
@@ -766,3 +766,40 @@ ul.day-list li a.read .num::after{content:"✓";margin-left:6px;color:#10b981;fo
   body.with-rail .lesson-head,body.with-rail .md-content,body.with-rail .prose,body.with-rail nav.pager,body.with-rail>main>*:not(.page-toc){grid-column:1}
   body.with-rail .page-toc{grid-column:2;grid-row:1/999;position:sticky;top:76px;margin:0}
 }
+
+/* ============================================================
+   Reading polish — rich lists, important highlight, warmth
+   ============================================================ */
+
+/* rich lists: tick-mark bullets + accent number badges */
+.prose ul.tick,.prose ol,.md-content ul,.md-content ol{list-style:none;margin:14px 0 20px;padding-left:1.85em}
+.prose ul.tick li,.prose ol li,.md-content ul li:not(.task),.md-content ol li{position:relative;margin:8px 0;line-height:1.72;color:var(--fg)}
+.prose ul.tick li::before,.md-content ul li:not(.task)::before{content:"✓";position:absolute;left:-1.7em;top:.02em;color:var(--accent);font-weight:800;font-size:.92em}
+.prose ol,.md-content ol{counter-reset:li}
+.prose ol li,.md-content ol li{counter-increment:li}
+.prose ol li::before,.md-content ol li::before{content:counter(li);position:absolute;left:-1.95em;top:.04em;min-width:1.5em;height:1.5em;padding:0 .32em;display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.72em;font-weight:700;line-height:1;color:var(--accent-strong);background:var(--accent-soft);border-radius:7px}
+/* nested lists a touch tighter */
+.md-content li>ul,.md-content li>ol{margin:6px 0 4px}
+
+/* important / key / pitfall — bright red, high-attention */
+.callout-important{--c:#ef4444;background:color-mix(in srgb,#ef4444 10%,var(--bg-card))}
+@media (prefers-color-scheme:dark){.callout-important{background:color-mix(in srgb,#ef4444 17%,var(--bg-card))}}
+.callout-important{border-left-width:5px}
+.callout-tip{--c:#0ea5e9}
+
+/* a brighter highlighter behind bold key terms */
+.md-content strong,.prose strong{
+  background:linear-gradient(to bottom,transparent 0,transparent 54%,
+    color-mix(in srgb,var(--accent) 32%,transparent) 54%,
+    color-mix(in srgb,var(--accent) 32%,transparent) 94%,transparent 94%);
+}
+
+/* reading rhythm — a bit more air, comfortable measure */
+.prose{margin-bottom:22px}
+.prose p{margin:0 0 13px;line-height:1.78}
+.md-content p{line-height:1.78}
+.prose p:last-child{margin-bottom:0}
+
+/* soft divider before each major section for scannability */
+h2.section{margin-top:52px}
+h2.section::after{content:"";position:absolute;left:-14px;right:0;bottom:-1px;height:0}
